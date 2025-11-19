@@ -322,17 +322,52 @@ func buildSummaryReport(report Report) string {
 	sb.WriteString(fmt.Sprintf("Library Type: %s\n", report.LibraryType))
 	sb.WriteString(fmt.Sprintf("Library Paths: %s\n\n", strings.Join(report.LibraryPaths, ", ")))
 
+	// Duplicates summary with examples
 	sb.WriteString("DUPLICATES\n")
-	sb.WriteString(fmt.Sprintf("  Groups found: %d\n", report.TotalDuplicates))
-	sb.WriteString(fmt.Sprintf("  Files to delete: %d\n", report.TotalFilesToDelete))
-	sb.WriteString(fmt.Sprintf("  Space to free: %s\n\n", formatBytes(report.SpaceToFree)))
+	sb.WriteString(strings.Repeat("-", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Groups found: %d\n", report.TotalDuplicates))
+	sb.WriteString(fmt.Sprintf("Files to delete: %d\n", report.TotalFilesToDelete))
+	sb.WriteString(fmt.Sprintf("Space to free: %s\n\n", formatBytes(report.SpaceToFree)))
 
+	if report.TotalDuplicates > 0 {
+		sb.WriteString("Examples (top 5 by space):\n")
+		topOffenders := getTopOffenders(report)
+		limit := 5
+		if len(topOffenders) < limit {
+			limit = len(topOffenders)
+		}
+		for i := 0; i < limit; i++ {
+			sb.WriteString(fmt.Sprintf("  %d. %s - %d versions, %s to free\n",
+				i+1, topOffenders[i].Name, topOffenders[i].Count, formatBytes(topOffenders[i].SpaceToFree)))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Compliance issues summary with examples
 	sb.WriteString("COMPLIANCE ISSUES\n")
-	sb.WriteString(fmt.Sprintf("  Files/folders to rename: %d\n\n", len(report.ComplianceIssues)))
+	sb.WriteString(strings.Repeat("-", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Files/folders to rename: %d\n\n", len(report.ComplianceIssues)))
 
+	if len(report.ComplianceIssues) > 0 {
+		sb.WriteString("Examples (first 5):\n")
+		limit := 5
+		if len(report.ComplianceIssues) < limit {
+			limit = len(report.ComplianceIssues)
+		}
+		for i := 0; i < limit; i++ {
+			issue := report.ComplianceIssues[i]
+			sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, filepath.Base(issue.Path)))
+			sb.WriteString(fmt.Sprintf("     Problem: %s\n", issue.Problem))
+			sb.WriteString(fmt.Sprintf("     Action: %s\n", issue.SuggestedAction))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Actions
 	sb.WriteString("ACTIONS\n")
-	sb.WriteString("  [F1] View detailed duplicate report\n")
-	sb.WriteString("  [F2] View detailed compliance report\n")
+	sb.WriteString(strings.Repeat("-", 80) + "\n")
+	sb.WriteString("  [F1] View full duplicate report (page up/down)\n")
+	sb.WriteString("  [F2] View full compliance report (page up/down)\n")
 	sb.WriteString("  [Enter] Clean (delete duplicates + fix compliance)\n")
 	sb.WriteString("  [Esc] Skip cleaning\n")
 
