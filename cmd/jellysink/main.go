@@ -7,25 +7,106 @@ import (
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
 
 	"github.com/Nomadcxx/jellysink/internal/cleaner"
+	"github.com/Nomadcxx/jellysink/internal/config"
+	"github.com/Nomadcxx/jellysink/internal/daemon"
 	"github.com/Nomadcxx/jellysink/internal/reporter"
 	"github.com/Nomadcxx/jellysink/internal/ui"
 )
 
+var (
+	cfgFile string
+	dryRun  bool
+)
+
+const exampleConfig = `[libraries.movies]
+paths = ["/path/to/your/movies"]
+
+[libraries.tv]
+paths = ["/path/to/your/tvshows"]
+
+[daemon]
+scan_frequency = "weekly"  # daily, weekly, biweekly
+`
+
+var rootCmd = &cobra.Command{
+	Use:   "jellysink",
+	Short: "Media library maintenance tool for Jellyfin/Plex",
+	Long: `jellysink scans your media libraries for duplicates and naming compliance issues.
+It generates reports and provides a TUI for reviewing and cleaning your library.`,
+}
+
+var scanCmd = &cobra.Command{
+	Use:   "scan",
+	Short: "Scan media libraries for duplicates and compliance issues",
+	Run:   runScan,
+}
+
+var viewCmd = &cobra.Command{
+	Use:   "view <report-file>",
+	Short: "View a scan report in the TUI",
+	Args:  cobra.ExactArgs(1),
+	Run:   runView,
+}
+
+var cleanCmd = &cobra.Command{
+	Use:   "clean <report-file>",
+	Short: "Clean duplicates and fix compliance issues from a report",
+	Args:  cobra.ExactArgs(1),
+	Run:   runClean,
+}
+
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Show configuration file location and contents",
+	Run:   runConfig,
+}
+
+func init() {
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/jellysink/config.toml)")
+	cleanCmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be deleted without actually deleting")
+
+	rootCmd.AddCommand(scanCmd)
+	rootCmd.AddCommand(viewCmd)
+	rootCmd.AddCommand(cleanCmd)
+	rootCmd.AddCommand(configCmd)
+}
+
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: jellysink <report-file.json>")
-		fmt.Println("\nExample: jellysink ~/.local/share/jellysink/scan_results/20250119_143025.json")
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runScan(cmd *cobra.Command, args []string) {
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 
-	reportPath := os.Args[1]
+	fmt.Println("Starting scan...")
+	d := daemon.New(cfg)
+	reportPath, err := d.RunScan()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nScan complete! Report saved to:\n  %s\n\n", reportPath)
+	fmt.Printf("View report with: jellysink view %s\n", reportPath)
+}
+
+func runView(cmd *cobra.Command, args []string) {
+	reportPath := args[0]
 
 	// Load the report
 	report, err := loadReport(reportPath)
 	if err != nil {
-		fmt.Printf("Error loading report: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading report: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -36,7 +117,7 @@ func main() {
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
-		fmt.Printf("Error running TUI: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -45,6 +126,58 @@ func main() {
 	if m.ShouldClean() {
 		performClean(report)
 	}
+}
+
+func runClean(cmd *cobra.Command, args []string) {
+	reportPath := args[0]
+
+	report, err := loadReport(reportPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading report: %v\n", err)
+		os.Exit(1)
+	}
+
+	performClean(report)
+}
+
+func runConfig(cmd *cobra.Command, args []string) {
+	home, _ := os.UserHomeDir()
+	configPath := filepath.Join(home, ".config/jellysink/config.toml")
+
+	fmt.Printf("Configuration file: %s\n\n", configPath)
+
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		fmt.Println("Config file does not exist. Create it with:")
+		fmt.Println("\n  mkdir -p ~/.config/jellysink")
+		fmt.Println("  cat > ~/.config/jellysink/config.toml <<EOF")
+		fmt.Println(exampleConfig)
+		fmt.Println("EOF")
+		return
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Current configuration:")
+	fmt.Printf("\nMovie libraries (%d):\n", len(cfg.Libraries.Movies.Paths))
+	for _, path := range cfg.Libraries.Movies.Paths {
+		fmt.Printf("  - %s\n", path)
+	}
+
+	fmt.Printf("\nTV libraries (%d):\n", len(cfg.Libraries.TV.Paths))
+	for _, path := range cfg.Libraries.TV.Paths {
+		fmt.Printf("  - %s\n", path)
+	}
+
+	fmt.Printf("\nDaemon settings:\n")
+	fmt.Printf("  Scan frequency: %s\n", cfg.Daemon.ScanFrequency)
+}
+
+func loadConfig() (*config.Config, error) {
+	return config.Load()
 }
 
 func loadReport(path string) (reporter.Report, error) {
