@@ -158,6 +158,9 @@ func (m Model) View() string {
 func (m Model) renderSummary() string {
 	var sb strings.Builder
 
+	// ASCII header
+	sb.WriteString(FormatASCIIHeader() + "\n\n")
+
 	// Timestamp and library info
 	sb.WriteString(InfoStyle.Render("Generated: ") + ContentStyle.Render(m.report.Timestamp.Format("2006-01-02 15:04:05")) + "\n")
 	sb.WriteString(InfoStyle.Render("Library: ") + ContentStyle.Render(m.report.LibraryType) + "\n")
