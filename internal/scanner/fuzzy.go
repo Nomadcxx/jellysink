@@ -126,15 +126,60 @@ func StripReleaseGroup(name string) string {
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
 
-	// Remove resolution markers
+	// Remove all scene release markers (comprehensive list)
+	// NOTE: Dots have been replaced with spaces at this point
+	// Order matters: more specific patterns first to avoid partial matches
 	patterns := []string{
-		`\b\d{3,4}p\b`,                                                                // 1080p 720p (word boundary on both sides)
-		`\b(BluRay|Blu-ray|WEB-DL|WEBDL|WEBRip|WEB|HDTV|DVDRip|BRRip|AMZN|NF)\b`,    // Source
-		`\b(x264|x265|H\.?264|H\.?265|HEVC|AV1)\b`,                                   // Codec
-		`\b(AAC|AC3|DTS|DD5\.1|DD\+?2\.0|TrueHD|Atmos)\b`,                           // Audio
-		`\b(PROPER|REPACK|INTERNAL|LIMITED|UNRATED|EXTENDED|DIRECTORS|CUT)\b`,       // Tags
-		`-[A-Za-z0-9]+$`,                                                              // Release group suffix
-		`\[.*?\]`,                                                                     // Bracketed content
+		// Resolution markers
+		`\b\d{3,4}[pi]\b`,  // 1080p, 720p, 2160p, 480i, 576i
+		`\b(4K|UHD)\b`,     // 4K, UHD
+
+		// HDR formats (before generic HDR to catch specific variants)
+		`\b(HDR10\+?|HDR10Plus|Dolby\s?Vision|DoVi|DV|HDR|HLG|PQ|SDR)\b`,
+
+		// Audio formats with channels (most specific first)
+		// NOTE: "DTS-HD.MA" becomes "DTS-HD MA" after dot replacement
+		// NOTE: "AAC.2.0" becomes "AAC 2 0" after dot replacement
+		`\b(DTS-HD\s?MA|DTS-HD\s?HRA|DTS-HD|DTS-X|DTS-ES)\b`,  // DTS variants
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                  // Audio with channels (DD5 1, DDP5 1, AAC2 0, DD 5 1)
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                        // Audio without channels
+		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,            // Other audio codecs
+
+		// Audio channels (after audio codecs, catches orphaned channels)
+		`\b\d\s\d\b`,        // 7 1, 5 1, 2 0 (after dot replacement)
+		`\b(Stereo|Mono)\b`,
+
+		// Source types
+		`\b(BluRay|Blu-ray|BDRip|BRRip|REMUX|WEB-DL|WEBDL|WEBRip|WEB)\b`,
+		`\b(HDTV|PDTV|SDTV|DVDRip|DVD|DVDSCR)\b`,
+		`\b(CAM|HDTS|TS|TC|SCR|R5)\b`,
+
+		// Streaming platforms
+		`\b(AMZN|NF|DSNP|HMAX|HULU|ATVP|PCOK|PMTP)\b`,
+
+		// Video codecs (H.264 becomes "H 264" after dot replacement)
+		`\bH\s26[456]\b`,  // H 264, H 265, H 266
+		`\b(x264|x265|x266|HEVC|AVC|AV1)\b`,
+		`\b(XviD|DivX|MPEG2|VC-1|VP9)\b`,
+
+		// Special editions
+		`\b(IMAX\s?Enhanced|IMAX|Remastered|REMASTERED)\b`,
+		`\b(Directors\s?Cut|DC|Theatrical|UNCUT|Criterion)\b`,
+
+		// Multi-language
+		`\b(MULTI|DUAL|DL|DUBBED|SUBBED)\b`,
+
+		// Release tags
+		`\b(PROPER|REPACK|iNTERNAL|INTERNAL|LiMiTED|LIMITED|UNRATED|EXTENDED)\b`,
+
+		// Version tags
+		`\bv\d+\b`,  // v2, v3, v4
+
+		// Release group suffix (with hyphen and period separators)
+		`\s?-\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,  // Matches "- YTS MX" or "-GROUP" at end
+
+		// Bracketed content
+		`\[.*?\]`,
 	}
 
 	for _, pattern := range patterns {
