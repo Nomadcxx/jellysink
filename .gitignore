@@ -1,0 +1,80 @@
+# Binaries
+jellysink
+jellysinkd
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+coverage.txt
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Dependency directories
+vendor/
+
+# Build directories
+build/
+dist/
+bin/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation and project files (keep these)
+!README.md
+!LICENSE
+
+# Scan results (user data)
+scan_results/
+*.txt
+
+# Claude and AI-related files (do not commit)
+CLAUDE.md
+AGENTS.md
+
+# Config files (may contain sensitive paths)
+config.toml
+
+# Debug and log files
+*.log
+debug.log
+jellysink-debug.log
+
+# Beads issue tracker (keep only issues.jsonl)
+.beads/db.db
+.beads/db.db-shm
+.beads/db.db-wal
+!.beads/issues.jsonl
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Archive files
+*.tar.gz
+*.zip
+*.tar
+
+# Package files
+*.deb
+*.rpm
+*.pkg.tar.zst
+
+# OpenMemory data (local only)
+openmemory.json
