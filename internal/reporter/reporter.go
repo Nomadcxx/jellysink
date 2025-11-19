@@ -24,7 +24,14 @@ type Report struct {
 	SpaceToFree        int64
 }
 
-// Generate creates a timestamped report file
+// ReportFiles holds paths to generated report files
+type ReportFiles struct {
+	Summary     string // Main summary report
+	Duplicates  string // Detailed duplicates report (F1)
+	Compliance  string // Detailed compliance report (F2)
+}
+
+// Generate creates a timestamped report file (legacy - generates single comprehensive report)
 func Generate(report Report) (string, error) {
 	// Create report directory
 	reportDir := getReportDir()
@@ -45,6 +52,42 @@ func Generate(report Report) (string, error) {
 	}
 
 	return filename, nil
+}
+
+// GenerateDetailed creates separate report files for TUI display (summary + detailed sections)
+func GenerateDetailed(report Report) (ReportFiles, error) {
+	reportDir := getReportDir()
+	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		return ReportFiles{}, fmt.Errorf("failed to create report directory: %w", err)
+	}
+
+	timestamp := report.Timestamp.Format("20060102_150405")
+
+	files := ReportFiles{
+		Summary:    filepath.Join(reportDir, timestamp+"_summary.txt"),
+		Duplicates: filepath.Join(reportDir, timestamp+"_duplicates.txt"),
+		Compliance: filepath.Join(reportDir, timestamp+"_compliance.txt"),
+	}
+
+	// Generate summary report (for TUI prompt)
+	summaryContent := buildSummaryReport(report)
+	if err := os.WriteFile(files.Summary, []byte(summaryContent), 0644); err != nil {
+		return files, fmt.Errorf("failed to write summary: %w", err)
+	}
+
+	// Generate detailed duplicates report (F1)
+	duplicatesContent := buildDuplicatesReport(report)
+	if err := os.WriteFile(files.Duplicates, []byte(duplicatesContent), 0644); err != nil {
+		return files, fmt.Errorf("failed to write duplicates: %w", err)
+	}
+
+	// Generate detailed compliance report (F2)
+	complianceContent := buildComplianceReport(report)
+	if err := os.WriteFile(files.Compliance, []byte(complianceContent), 0644); err != nil {
+		return files, fmt.Errorf("failed to write compliance: %w", err)
+	}
+
+	return files, nil
 }
 
 // getReportDir returns the report directory path
@@ -267,4 +310,91 @@ func formatBytes(bytes int64) string {
 	}
 
 	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// buildSummaryReport generates summary-only report for TUI prompt
+func buildSummaryReport(report Report) string {
+	var sb strings.Builder
+
+	sb.WriteString("JELLYSINK SCAN SUMMARY\n")
+	sb.WriteString(strings.Repeat("=", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Generated: %s\n", report.Timestamp.Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("Library Type: %s\n", report.LibraryType))
+	sb.WriteString(fmt.Sprintf("Library Paths: %s\n\n", strings.Join(report.LibraryPaths, ", ")))
+
+	sb.WriteString("DUPLICATES\n")
+	sb.WriteString(fmt.Sprintf("  Groups found: %d\n", report.TotalDuplicates))
+	sb.WriteString(fmt.Sprintf("  Files to delete: %d\n", report.TotalFilesToDelete))
+	sb.WriteString(fmt.Sprintf("  Space to free: %s\n\n", formatBytes(report.SpaceToFree)))
+
+	sb.WriteString("COMPLIANCE ISSUES\n")
+	sb.WriteString(fmt.Sprintf("  Files/folders to rename: %d\n\n", len(report.ComplianceIssues)))
+
+	sb.WriteString("ACTIONS\n")
+	sb.WriteString("  [F1] View detailed duplicate report\n")
+	sb.WriteString("  [F2] View detailed compliance report\n")
+	sb.WriteString("  [Enter] Clean (delete duplicates + fix compliance)\n")
+	sb.WriteString("  [Esc] Skip cleaning\n")
+
+	return sb.String()
+}
+
+// buildDuplicatesReport generates detailed duplicates report (F1)
+func buildDuplicatesReport(report Report) string {
+	var sb strings.Builder
+
+	sb.WriteString("JELLYSINK DUPLICATE REPORT\n")
+	sb.WriteString(strings.Repeat("=", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Generated: %s\n\n", report.Timestamp.Format("2006-01-02 15:04:05")))
+
+	if len(report.MovieDuplicates) > 0 {
+		sb.WriteString("MOVIE DUPLICATES\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		for _, dup := range report.MovieDuplicates {
+			sb.WriteString(formatMovieDuplicate(dup))
+			sb.WriteString("\n")
+		}
+	}
+
+	if len(report.TVDuplicates) > 0 {
+		sb.WriteString("TV EPISODE DUPLICATES\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		for _, dup := range report.TVDuplicates {
+			sb.WriteString(formatTVDuplicate(dup))
+			sb.WriteString("\n")
+		}
+	}
+
+	if len(report.MovieDuplicates) == 0 && len(report.TVDuplicates) == 0 {
+		sb.WriteString("No duplicates found.\n")
+	}
+
+	return sb.String()
+}
+
+// buildComplianceReport generates detailed compliance report (F2)
+func buildComplianceReport(report Report) string {
+	var sb strings.Builder
+
+	sb.WriteString("JELLYSINK COMPLIANCE REPORT\n")
+	sb.WriteString(strings.Repeat("=", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Generated: %s\n\n", report.Timestamp.Format("2006-01-02 15:04:05")))
+
+	if len(report.ComplianceIssues) == 0 {
+		sb.WriteString("No compliance issues found. All files follow Jellyfin naming conventions.\n")
+		return sb.String()
+	}
+
+	sb.WriteString("NON-COMPLIANT FILES AND FOLDERS\n")
+	sb.WriteString(strings.Repeat("=", 80) + "\n")
+	sb.WriteString(fmt.Sprintf("Total issues: %d\n\n", len(report.ComplianceIssues)))
+
+	for i, issue := range report.ComplianceIssues {
+		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.ToUpper(issue.Type), issue.Problem))
+		sb.WriteString(fmt.Sprintf("   Current:  %s\n", issue.Path))
+		sb.WriteString(fmt.Sprintf("   Fixed:    %s\n", issue.SuggestedPath))
+		sb.WriteString(fmt.Sprintf("   Action:   %s\n\n", issue.SuggestedAction))
+	}
+
+	return sb.String()
 }
