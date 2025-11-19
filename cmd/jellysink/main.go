@@ -34,8 +34,7 @@ scan_frequency = "weekly"  # daily, weekly, biweekly
 var rootCmd = &cobra.Command{
 	Use:   "jellysink",
 	Short: "Media library maintenance tool for Jellyfin/Plex",
-	Long: `jellysink scans your media libraries for duplicates and naming compliance issues.
-It generates reports and provides a TUI for reviewing and cleaning your library.`,
+	Long:  getLongDescription(),
 }
 
 var scanCmd = &cobra.Command{
@@ -178,6 +177,12 @@ func runConfig(cmd *cobra.Command, args []string) {
 
 func loadConfig() (*config.Config, error) {
 	return config.Load()
+}
+
+func getLongDescription() string {
+	return ui.FormatASCIIHeader() + "\n\n" +
+		"jellysink scans your media libraries for duplicates and naming compliance issues.\n" +
+		"It generates reports and provides a TUI for reviewing and cleaning your library."
 }
 
 func loadReport(path string) (reporter.Report, error) {
