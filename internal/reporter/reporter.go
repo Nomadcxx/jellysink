@@ -124,7 +124,7 @@ func buildReportContent(report Report) string {
 	if report.TotalDuplicates > 0 {
 		sb.WriteString("TOP OFFENDERS\n")
 		sb.WriteString(strings.Repeat("=", 80) + "\n")
-		topOffenders := getTopOffenders(report)
+		topOffenders := GetTopOffenders(report)
 		for i, offender := range topOffenders {
 			sb.WriteString(fmt.Sprintf("%d. %s - %d versions, %s to free\n",
 				i+1, offender.Name, offender.Count, formatBytes(offender.SpaceToFree)))
@@ -192,8 +192,8 @@ type Offender struct {
 	SpaceToFree int64
 }
 
-// getTopOffenders returns top 15 duplicate groups by space saved
-func getTopOffenders(report Report) []Offender {
+// GetTopOffenders returns top 15 duplicate groups by space saved
+func GetTopOffenders(report Report) []Offender {
 	var offenders []Offender
 
 	// Add movie duplicates
@@ -331,7 +331,7 @@ func buildSummaryReport(report Report) string {
 
 	if report.TotalDuplicates > 0 {
 		sb.WriteString("Examples (top 5 by space):\n")
-		topOffenders := getTopOffenders(report)
+		topOffenders := GetTopOffenders(report)
 		limit := 5
 		if len(topOffenders) < limit {
 			limit = len(topOffenders)
