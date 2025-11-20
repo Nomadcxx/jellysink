@@ -1,0 +1,11 @@
+[Unit]
+Description=Jellysink media library scan timer
+Requires=jellysink.service
+
+[Timer]
+# Default: Run weekly on Sunday at 2 AM
+OnCalendar=Sun *-*-* 02:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
