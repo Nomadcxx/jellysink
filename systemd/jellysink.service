@@ -1,0 +1,28 @@
+[Unit]
+Description=Jellysink Media Library Maintenance Daemon
+Documentation=https://github.com/Nomadcxx/jellysink
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/jellysinkd
+Restart=on-failure
+RestartSec=10s
+User=%u
+Group=%g
+
+# Security hardening
+PrivateTmp=yes
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/jellysink %h/.local/share/jellysink
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jellysinkd
+
+[Install]
+WantedBy=default.target
