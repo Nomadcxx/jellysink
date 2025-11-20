@@ -2,7 +2,7 @@ package ui
 
 import "github.com/charmbracelet/lipgloss"
 
-// ASCII art for jellysink header
+// ASCII art for jellysink header as single string to preserve exact formatting
 const jellysinkASCII = `  ████              ████   ████                            ████                ████
                     ████   ████                                                ████
   ████  ██████████  ████   ████  ████  ████  ██████████  ██████    ██████████  ████  ████
@@ -11,23 +11,33 @@ const jellysinkASCII = `  ████              ████   ████ 
   ████  ████        ████   ████  ██████████      ██████  ████████  ████  ████  ██████████
   ████  ██████████  ████   ████  ██████████  ██████████  ████████  ████  ████  ████  ████
 ██████                                 ████
-██████                           ██████████`
+██████                           ██████████                                              `
 
 // FormatASCIIHeader renders the jellysink ASCII header with RAMA theme
+// Render as single block to preserve spacing and structure
 func FormatASCIIHeader() string {
-	// Apply RAMA red color to ASCII art
-	style := lipgloss.NewStyle().
+	headerStyle := lipgloss.NewStyle().
 		Foreground(RAMARed).
 		Bold(true)
 
-	return style.Render(jellysinkASCII)
+	return headerStyle.Render(jellysinkASCII)
+}
+
+// FormatASCIIHeaderCentered renders header centered
+func FormatASCIIHeaderCentered(width int) string {
+	headerStyle := lipgloss.NewStyle().
+		Foreground(RAMARed).
+		Bold(true).
+		Align(lipgloss.Center).
+		Width(width)
+
+	return headerStyle.Render(jellysinkASCII)
 }
 
 // FormatASCIIHeaderWithSubtext renders header with subtitle
 func FormatASCIIHeaderWithSubtext(subtext string) string {
 	header := FormatASCIIHeader()
 
-	// Subtitle in muted color
 	subtitle := lipgloss.NewStyle().
 		Foreground(RAMAMuted).
 		Render(subtext)
