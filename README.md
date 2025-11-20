@@ -14,17 +14,18 @@ Automated media library maintenance for Jellyfin/Plex. Scans for duplicates and 
 ## Installation
 
 ```bash
-# Clone and build
+# Clone the repository
 git clone https://github.com/Nomadcxx/jellysink
 cd jellysink
-make all
 
-# Install system-wide (requires root)
-sudo ./install.sh
-
-# Or install for current user only
+# Run the TUI installer
 ./install.sh
 ```
+
+The installer will guide you through:
+- Installing binaries to `/usr/local/bin`
+- Creating configuration at `~/.config/jellysink/config.toml`
+- Setting up systemd service and timer
 
 ## Configuration
 

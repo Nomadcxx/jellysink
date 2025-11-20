@@ -78,3 +78,7 @@ temp/
 
 # OpenMemory data (local only)
 openmemory.json
+
+# Gemini specific files
+GEMINI.md
+jellysink_backup.tar.gz
