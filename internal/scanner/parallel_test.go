@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,7 +45,7 @@ func TestScanMoviesParallel(t *testing.T) {
 
 	// Test parallel scanning
 	config := ParallelConfig{Workers: 2}
-	duplicates, err := ScanMoviesParallel([]string{tmpDir}, config)
+	duplicates, err := ScanMoviesParallel(context.Background(), []string{tmpDir}, config)
 	if err != nil {
 		t.Fatalf("ScanMoviesParallel failed: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestScanTVShowsParallel(t *testing.T) {
 
 	// Test parallel scanning
 	config := ParallelConfig{Workers: 2}
-	duplicates, err := ScanTVShowsParallel([]string{tmpDir}, config)
+	duplicates, err := ScanTVShowsParallel(context.Background(), []string{tmpDir}, config)
 	if err != nil {
 		t.Fatalf("ScanTVShowsParallel failed: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestParallelVsSequentialMovies(t *testing.T) {
 	}
 
 	config := ParallelConfig{Workers: 4}
-	parallel, err := ScanMoviesParallel([]string{tmpDir}, config)
+	parallel, err := ScanMoviesParallel(context.Background(), []string{tmpDir}, config)
 	if err != nil {
 		t.Fatalf("ScanMoviesParallel failed: %v", err)
 	}
@@ -200,7 +201,7 @@ func TestParallelVsSequentialTV(t *testing.T) {
 	}
 
 	config := ParallelConfig{Workers: 4}
-	parallel, err := ScanTVShowsParallel([]string{tmpDir}, config)
+	parallel, err := ScanTVShowsParallel(context.Background(), []string{tmpDir}, config)
 	if err != nil {
 		t.Fatalf("ScanTVShowsParallel failed: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestParallelWithMultiplePaths(t *testing.T) {
 
 	// Scan both paths in parallel
 	config := ParallelConfig{Workers: 2}
-	duplicates, err := ScanMoviesParallel([]string{tmpDir1, tmpDir2}, config)
+	duplicates, err := ScanMoviesParallel(context.Background(), []string{tmpDir1, tmpDir2}, config)
 	if err != nil {
 		t.Fatalf("ScanMoviesParallel failed: %v", err)
 	}
@@ -249,12 +250,12 @@ func TestParallelWithInvalidPath(t *testing.T) {
 	config := ParallelConfig{Workers: 2}
 
 	// Test with non-existent path
-	_, err := ScanMoviesParallel([]string{"/nonexistent/path"}, config)
+	_, err := ScanMoviesParallel(context.Background(), []string{"/nonexistent/path"}, config)
 	if err == nil {
 		t.Error("Expected error for non-existent path, got nil")
 	}
 
-	_, err = ScanTVShowsParallel([]string{"/nonexistent/path"}, config)
+	_, err = ScanTVShowsParallel(context.Background(), []string{"/nonexistent/path"}, config)
 	if err == nil {
 		t.Error("Expected error for non-existent path, got nil")
 	}
@@ -270,7 +271,7 @@ func TestParallelConfigWithZeroWorkers(t *testing.T) {
 
 	// Test with zero workers (should default to runtime.NumCPU())
 	config := ParallelConfig{Workers: 0}
-	_, err := ScanMoviesParallel([]string{tmpDir}, config)
+	_, err := ScanMoviesParallel(context.Background(), []string{tmpDir}, config)
 	if err != nil {
 		t.Fatalf("ScanMoviesParallel with zero workers failed: %v", err)
 	}

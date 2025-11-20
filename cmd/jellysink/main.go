@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -103,10 +106,27 @@ func runScan(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Create context with cancellation support (Ctrl+C)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\nCancelling scan...")
+		cancel()
+	}()
+
 	fmt.Println("Starting scan...")
 	d := daemon.New(cfg)
-	reportPath, err := d.RunScan()
+	reportPath, err := d.RunScan(ctx)
 	if err != nil {
+		if err == context.Canceled {
+			fmt.Fprintf(os.Stderr, "Scan cancelled by user\n")
+			os.Exit(130) // Exit code 130 for SIGINT
+		}
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
 	}
