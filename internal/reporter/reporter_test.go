@@ -54,7 +54,7 @@ func TestGetTopOffenders(t *testing.T) {
 		},
 	}
 
-	offenders := getTopOffenders(report)
+	offenders := GetTopOffenders(report)
 
 	// Should have 2 offenders
 	if len(offenders) != 2 {

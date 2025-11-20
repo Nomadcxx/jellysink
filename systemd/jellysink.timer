@@ -1,17 +1,11 @@
 [Unit]
-Description=Jellysink Weekly Media Library Scan
-Documentation=https://github.com/Nomadcxx/jellysink
+Description=Jellysink media library scan timer
 Requires=jellysink.service
 
 [Timer]
-# Run weekly on Sunday at 2 AM
+# Default: Run weekly on Sunday at 2 AM
 OnCalendar=Sun *-*-* 02:00:00
-# Run 5 minutes after boot if missed
-OnBootSec=5min
-# Keep persistent across reboots
 Persistent=true
-# Add randomized delay to avoid load spikes
-RandomizedDelaySec=30min
 
 [Install]
 WantedBy=timers.target

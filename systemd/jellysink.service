@@ -1,28 +1,18 @@
 [Unit]
-Description=Jellysink Media Library Maintenance Daemon
-Documentation=https://github.com/Nomadcxx/jellysink
-After=network-online.target
-Wants=network-online.target
+Description=Jellysink media library scan service
+After=network.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/jellysinkd
-Restart=on-failure
-RestartSec=10s
+Type=oneshot
 User=%u
-Group=%g
+ExecStart=/usr/local/bin/jellysinkd
 
 # Security hardening
-PrivateTmp=yes
+PrivateTmp=true
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.config/jellysink %h/.local/share/jellysink
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=jellysinkd
+ReadWritePaths=%h/.local/share/jellysink %h/.config/jellysink
 
 [Install]
 WantedBy=default.target
