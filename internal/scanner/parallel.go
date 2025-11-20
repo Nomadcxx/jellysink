@@ -1,6 +1,7 @@
 package scanner
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,7 +23,8 @@ func DefaultParallelConfig() ParallelConfig {
 
 // ScanMoviesParallel scans movie libraries using worker pools for improved performance
 // Processes multiple library paths concurrently
-func ScanMoviesParallel(paths []string, config ParallelConfig) ([]MovieDuplicate, error) {
+// Supports context cancellation for graceful shutdown
+func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConfig) ([]MovieDuplicate, error) {
 	if config.Workers <= 0 {
 		config.Workers = runtime.NumCPU()
 	}
@@ -47,13 +49,25 @@ func ScanMoviesParallel(paths []string, config ParallelConfig) ([]MovieDuplicate
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for libPath := range pathChan {
-				if err := scanMoviePathParallel(libPath, movieGroups, &mu); err != nil {
+			for {
+				select {
+				case <-ctx.Done():
 					errOnce.Do(func() {
-						scanErr = err
-						errChan <- err
+						scanErr = ctx.Err()
+						errChan <- ctx.Err()
 					})
 					return
+				case libPath, ok := <-pathChan:
+					if !ok {
+						return
+					}
+					if err := scanMoviePathParallel(ctx, libPath, movieGroups, &mu); err != nil {
+						errOnce.Do(func() {
+							scanErr = err
+							errChan <- err
+						})
+						return
+					}
 				}
 			}
 		}()
@@ -61,7 +75,13 @@ func ScanMoviesParallel(paths []string, config ParallelConfig) ([]MovieDuplicate
 
 	// Send paths to workers
 	for _, path := range paths {
-		pathChan <- path
+		select {
+		case <-ctx.Done():
+			close(pathChan)
+			wg.Wait()
+			return nil, ctx.Err()
+		case pathChan <- path:
+		}
 	}
 	close(pathChan)
 
@@ -86,14 +106,22 @@ func ScanMoviesParallel(paths []string, config ParallelConfig) ([]MovieDuplicate
 }
 
 // scanMoviePathParallel scans a single movie library path (thread-safe)
-func scanMoviePathParallel(libPath string, movieGroups map[string]*MovieDuplicate, mu *sync.Mutex) error {
+// Supports context cancellation
+func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[string]*MovieDuplicate, mu *sync.Mutex) error {
 	// Verify path exists
 	if _, err := os.Stat(libPath); err != nil {
 		return fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 	}
 
-	// Walk directory tree
+	// Walk directory tree with context cancellation support
 	err := filepath.Walk(libPath, func(path string, info os.FileInfo, err error) error {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if err != nil {
 			return err
 		}
@@ -148,7 +176,8 @@ func scanMoviePathParallel(libPath string, movieGroups map[string]*MovieDuplicat
 
 // ScanTVShowsParallel scans TV library paths using worker pools for improved performance
 // Processes multiple library paths concurrently
-func ScanTVShowsParallel(paths []string, config ParallelConfig) ([]TVDuplicate, error) {
+// Supports context cancellation for graceful shutdown
+func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelConfig) ([]TVDuplicate, error) {
 	if config.Workers <= 0 {
 		config.Workers = runtime.NumCPU()
 	}
@@ -173,13 +202,25 @@ func ScanTVShowsParallel(paths []string, config ParallelConfig) ([]TVDuplicate, 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for libPath := range pathChan {
-				if err := scanTVPathParallel(libPath, episodeGroups, &mu); err != nil {
+			for {
+				select {
+				case <-ctx.Done():
 					errOnce.Do(func() {
-						scanErr = err
-						errChan <- err
+						scanErr = ctx.Err()
+						errChan <- ctx.Err()
 					})
 					return
+				case libPath, ok := <-pathChan:
+					if !ok {
+						return
+					}
+					if err := scanTVPathParallel(ctx, libPath, episodeGroups, &mu); err != nil {
+						errOnce.Do(func() {
+							scanErr = err
+							errChan <- err
+						})
+						return
+					}
 				}
 			}
 		}()
@@ -187,7 +228,13 @@ func ScanTVShowsParallel(paths []string, config ParallelConfig) ([]TVDuplicate, 
 
 	// Send paths to workers
 	for _, path := range paths {
-		pathChan <- path
+		select {
+		case <-ctx.Done():
+			close(pathChan)
+			wg.Wait()
+			return nil, ctx.Err()
+		case pathChan <- path:
+		}
 	}
 	close(pathChan)
 
@@ -212,14 +259,22 @@ func ScanTVShowsParallel(paths []string, config ParallelConfig) ([]TVDuplicate, 
 }
 
 // scanTVPathParallel scans a single TV library path (thread-safe)
-func scanTVPathParallel(libPath string, episodeGroups map[string]*TVDuplicate, mu *sync.Mutex) error {
+// Supports context cancellation
+func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[string]*TVDuplicate, mu *sync.Mutex) error {
 	// Verify path exists
 	if _, err := os.Stat(libPath); err != nil {
 		return fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 	}
 
-	// Walk directory tree
+	// Walk directory tree with context cancellation support
 	err := filepath.Walk(libPath, func(path string, info os.FileInfo, err error) error {
+		// Check for cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if err != nil {
 			return err
 		}

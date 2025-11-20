@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,7 +26,8 @@ func New(cfg *config.Config) *Daemon {
 }
 
 // RunScan executes a full scan and generates a report
-func (d *Daemon) RunScan() (string, error) {
+// Supports context cancellation for graceful shutdown
+func (d *Daemon) RunScan(ctx context.Context) (string, error) {
 	report := reporter.Report{
 		Timestamp:    time.Now(),
 		LibraryPaths: []string{},
@@ -39,7 +41,7 @@ func (d *Daemon) RunScan() (string, error) {
 		report.LibraryType = "movies"
 		report.LibraryPaths = d.config.Libraries.Movies.Paths
 
-		movieDuplicates, err := scanner.ScanMoviesParallel(d.config.Libraries.Movies.Paths, parallelConfig)
+		movieDuplicates, err := scanner.ScanMoviesParallel(ctx, d.config.Libraries.Movies.Paths, parallelConfig)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan movies: %w", err)
 		}
@@ -63,7 +65,7 @@ func (d *Daemon) RunScan() (string, error) {
 			report.LibraryPaths = append(report.LibraryPaths, d.config.Libraries.TV.Paths...)
 		}
 
-		tvDuplicates, err := scanner.ScanTVShowsParallel(d.config.Libraries.TV.Paths, parallelConfig)
+		tvDuplicates, err := scanner.ScanTVShowsParallel(ctx, d.config.Libraries.TV.Paths, parallelConfig)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan TV shows: %w", err)
 		}
