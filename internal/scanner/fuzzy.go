@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // NormalizeName normalizes a media name for fuzzy matching
@@ -292,8 +295,9 @@ func CleanMovieName(name string) string {
 	name = re.ReplaceAllString(name, " ")
 	name = strings.TrimSpace(name)
 
-	// Title case
-	name = strings.Title(name)
+	// Title case (using cases.Title instead of deprecated strings.Title)
+	caser := cases.Title(language.English)
+	name = caser.String(name)
 
 	// Add year if found
 	if year != "" {
