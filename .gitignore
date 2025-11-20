@@ -1,6 +1,6 @@
-# Binaries
-jellysink
-jellysinkd
+# Binaries (root level only)
+/jellysink
+/jellysinkd
 *.exe
 *.exe~
 *.dll
