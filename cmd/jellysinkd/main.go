@@ -10,6 +10,13 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/reporter"
 )
 
+var (
+	// Version information (set via -ldflags during build)
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
+)
+
 func main() {
 	// Load configuration
 	cfg, err := loadConfig()
