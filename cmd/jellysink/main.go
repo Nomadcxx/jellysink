@@ -165,7 +165,7 @@ func runConfig(cmd *cobra.Command, args []string) {
 		fmt.Println("Config file does not exist. Create it with:")
 		fmt.Println("\n  mkdir -p ~/.config/jellysink")
 		fmt.Println("  cat > ~/.config/jellysink/config.toml <<EOF")
-		fmt.Println(exampleConfig)
+		fmt.Print(exampleConfig)
 		fmt.Println("EOF")
 		return
 	}
