@@ -10,6 +10,12 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
 
+const (
+	// DefaultMaxSizeGB is the default maximum total size to delete in one operation (in GB)
+	// Set to 3TB to accommodate users with large media libraries
+	DefaultMaxSizeGB = 3000
+)
+
 // CleanResult represents the result of a cleaning operation
 type CleanResult struct {
 	DuplicatesDeleted    int
@@ -42,7 +48,7 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		DryRun:    false,
-		MaxSizeGB: 100, // 100GB limit
+		MaxSizeGB: DefaultMaxSizeGB,
 		ProtectedPaths: []string{
 			// System directories
 			"/usr", "/etc", "/bin", "/sbin", "/boot",
