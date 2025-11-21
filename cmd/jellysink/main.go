@@ -43,6 +43,7 @@ var rootCmd = &cobra.Command{
 	Use:   "jellysink",
 	Short: "Media library maintenance tool for Jellyfin/Plex",
 	Long:  getLongDescription(),
+	Run:   runTUI, // Launch TUI by default when run without subcommands
 }
 
 var scanCmd = &cobra.Command{
@@ -95,6 +96,29 @@ func init() {
 func main() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// runTUI launches the main menu TUI (default behavior)
+func runTUI(cmd *cobra.Command, args []string) {
+	// Load config
+	cfg, err := loadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Creating default config...\n")
+		cfg = config.DefaultConfig()
+		if err := config.Save(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create config: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Launch main menu TUI
+	model := ui.NewMenuModel(cfg)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
 }
