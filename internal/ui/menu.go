@@ -104,7 +104,13 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-2)
+		// Calculate list height after accounting for other content:
+		// ASCII header (9 lines) + spacing (2) + config status (5) + spacing (1) + footer (3) + padding (2) = 22 lines
+		listHeight := msg.Height - 22
+		if listHeight < 6 {
+			listHeight = 6 // Minimum list height
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
 		return m, nil
 
 	case scanStatusMsg:
@@ -290,7 +296,12 @@ func (m FrequencyMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-2)
+		// ASCII header (9) + spacing (2) + footer (3) + padding (2) = 16 lines
+		listHeight := msg.Height - 16
+		if listHeight < 8 {
+			listHeight = 8
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
 	}
 
 	var cmd tea.Cmd
@@ -421,7 +432,12 @@ func (m DaemonMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-2)
+		// ASCII header (9) + status section (5) + footer (3) + padding (2) = 19 lines
+		listHeight := msg.Height - 19
+		if listHeight < 6 {
+			listHeight = 6
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
 	}
 
 	var cmd tea.Cmd
@@ -560,7 +576,12 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-2)
+		// ASCII header (9) + title (1) + library preview (15) + footer (3) + padding (2) = 30 lines
+		listHeight := msg.Height - 30
+		if listHeight < 5 {
+			listHeight = 5
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
 	}
 
 	var cmd tea.Cmd
@@ -963,7 +984,12 @@ func (m RemovePathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.list.SetSize(msg.Width, msg.Height-2)
+		// ASCII header (9) + spacing (2) + footer (3) + padding (2) = 16 lines
+		listHeight := msg.Height - 16
+		if listHeight < 8 {
+			listHeight = 8
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
 	}
 
 	var cmd tea.Cmd
