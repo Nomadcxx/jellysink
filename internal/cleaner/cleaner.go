@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Nomadcxx/jellysink/internal/scanner"
@@ -215,6 +216,38 @@ func validatePath(path string) error {
 	return nil
 }
 
+// getFileOwnership returns the UID and GID of a file
+// This is critical when running as root to preserve original ownership
+func getFileOwnership(path string) (int, int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// On non-Unix systems, return 0,0 (no-op)
+		return 0, 0, nil
+	}
+
+	return int(stat.Uid), int(stat.Gid), nil
+}
+
+// preserveOwnership restores file ownership after operations
+// When running as root/sudo, this prevents files from being owned by root
+func preserveOwnership(path string, uid, gid int) error {
+	// Skip if UID/GID are both 0 (root or unsupported platform)
+	if uid == 0 && gid == 0 {
+		return nil
+	}
+
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("failed to restore ownership: %w", err)
+	}
+
+	return nil
+}
+
 // performRename renames a file in place (same directory)
 func performRename(oldPath, newPath string, dryRun bool) (Operation, error) {
 	// Validate paths for security
@@ -233,9 +266,22 @@ func performRename(oldPath, newPath string, dryRun bool) (Operation, error) {
 	}
 
 	if !dryRun {
+		// Get original ownership before rename (critical for sudo operations)
+		uid, gid, err := getFileOwnership(oldPath)
+		if err != nil {
+			return op, fmt.Errorf("failed to get ownership: %w", err)
+		}
+
+		// Perform rename
 		if err := os.Rename(oldPath, newPath); err != nil {
 			return op, fmt.Errorf("rename failed %s -> %s: %w", oldPath, newPath, err)
 		}
+
+		// Restore original ownership to prevent root takeover
+		if err := preserveOwnership(newPath, uid, gid); err != nil {
+			return op, fmt.Errorf("rename succeeded but ownership restore failed: %w", err)
+		}
+
 		op.Completed = true
 	} else {
 		op.Completed = true
@@ -262,15 +308,39 @@ func performReorganize(oldPath, newPath string, dryRun bool) (Operation, error) 
 	}
 
 	if !dryRun {
+		// Get original ownership before move (critical for sudo operations)
+		uid, gid, err := getFileOwnership(oldPath)
+		if err != nil {
+			return op, fmt.Errorf("failed to get ownership: %w", err)
+		}
+
+		// Get parent directory ownership to preserve it for new dirs
+		parentDir := filepath.Dir(oldPath)
+		parentUID, parentGID, err := getFileOwnership(parentDir)
+		if err != nil {
+			// If we can't get parent ownership, use file ownership
+			parentUID, parentGID = uid, gid
+		}
+
 		// Create destination directory if it doesn't exist
 		destDir := filepath.Dir(newPath)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			return op, fmt.Errorf("failed to create directory %s: %w", destDir, err)
 		}
 
+		// Preserve ownership on newly created directories
+		if err := preserveOwnership(destDir, parentUID, parentGID); err != nil {
+			// Non-fatal - log but continue
+		}
+
 		// Move the file
 		if err := os.Rename(oldPath, newPath); err != nil {
 			return op, fmt.Errorf("move failed %s -> %s: %w", oldPath, newPath, err)
+		}
+
+		// Restore original ownership to prevent root takeover
+		if err := preserveOwnership(newPath, uid, gid); err != nil {
+			return op, fmt.Errorf("move succeeded but ownership restore failed: %w", err)
 		}
 
 		// Clean up empty parent directories

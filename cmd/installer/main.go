@@ -454,24 +454,24 @@ func (m model) renderComplete() string {
 			b.WriteString("\n\n")
 
 			// Next steps
-			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Configure library paths:"))
+			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Get Started:"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  edit ~/.config/jellysink/config.toml"))
+			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  jellysink"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("  ↳ Interactive TUI to configure libraries, set scan frequency,"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("    enable daemon, and run scans/cleans"))
 			b.WriteString("\n\n")
 
-			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Start the service:"))
+			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Command Line Options (optional):"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  sudo systemctl enable --now jellysink.timer"))
-			b.WriteString("\n\n")
-
-			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Manual scan:"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink scan              - Run manual scan"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  jellysink scan"))
-			b.WriteString("\n\n")
-
-			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("View results:"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink view <report>     - View scan report"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  jellysink view <report.json>"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink clean <report>    - Clean from report"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink version           - Show version info"))
 		}
 	}
 

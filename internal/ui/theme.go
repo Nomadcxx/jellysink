@@ -115,3 +115,31 @@ func FormatFooter(keybindings ...string) string {
 	}
 	return FooterStyle.Render(footer)
 }
+
+// Status marker styles (moonbit-inspired)
+var (
+	OKMarker   = lipgloss.NewStyle().Foreground(ColorSuccess).SetString("[OK]")
+	InfoMarker = lipgloss.NewStyle().Foreground(ColorInfo).SetString("[INFO]")
+	WarnMarker = lipgloss.NewStyle().Foreground(ColorWarning).SetString("[WARN]")
+	FailMarker = lipgloss.NewStyle().Foreground(ColorError).SetString("[FAIL]")
+)
+
+// FormatStatusOK returns an [OK] marker with message
+func FormatStatusOK(message string) string {
+	return OKMarker.String() + " " + message
+}
+
+// FormatStatusInfo returns an [INFO] marker with message
+func FormatStatusInfo(message string) string {
+	return InfoMarker.String() + " " + message
+}
+
+// FormatStatusWarn returns a [WARN] marker with message
+func FormatStatusWarn(message string) string {
+	return WarnMarker.String() + " " + message
+}
+
+// FormatStatusFail returns a [FAIL] marker with message
+func FormatStatusFail(message string) string {
+	return FailMarker.String() + " " + message
+}
