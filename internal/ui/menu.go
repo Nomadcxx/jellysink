@@ -159,29 +159,56 @@ func (m MenuModel) viewLastReport() tea.Msg {
 
 // View renders the menu
 func (m MenuModel) View() string {
+	// Minimum dimensions for ASCII art: 100 width x 25 height
+	const minWidth = 100
+	const minHeight = 25
+
+	// Check if terminal is too small
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
 	// Show ASCII header
-	header := FormatASCIIHeader() + "\n\n"
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
 
 	// Show config status
-	var status strings.Builder
-	status.WriteString(InfoStyle.Render("Configuration Status:") + "\n")
-	status.WriteString(fmt.Sprintf("  Movie libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.Movies.Paths)))))
-	status.WriteString(fmt.Sprintf("  TV libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.TV.Paths)))))
-	status.WriteString(fmt.Sprintf("  Scan frequency: %s\n", SuccessStyle.Render(m.config.Daemon.ScanFrequency)))
-	status.WriteString("\n")
+	content.WriteString(InfoStyle.Render("Configuration Status:") + "\n")
+	content.WriteString(fmt.Sprintf("  Movie libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.Movies.Paths)))))
+	content.WriteString(fmt.Sprintf("  TV libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.TV.Paths)))))
+	content.WriteString(fmt.Sprintf("  Scan frequency: %s\n", SuccessStyle.Render(m.config.Daemon.ScanFrequency)))
+	content.WriteString("\n")
 
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		header,
-		status.String(),
-		m.list.View(),
-	)
+	// Add menu list
+	content.WriteString(m.list.View())
+
+	// Wrap in padding and border like installer
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4) // Account for padding
+
+	return mainStyle.Render(content.String())
 }
 
 // FrequencyMenuModel handles scan frequency configuration
 type FrequencyMenuModel struct {
 	list   list.Model
 	config *config.Config
+	width  int
+	height int
 }
 
 // NewFrequencyMenuModel creates frequency selection menu
@@ -240,7 +267,9 @@ func (m FrequencyMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, msg.Height)
+		m.width = msg.Width
+		m.height = msg.Height
+		m.list.SetSize(msg.Width, msg.Height-2)
 	}
 
 	var cmd tea.Cmd
@@ -249,13 +278,43 @@ func (m FrequencyMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m FrequencyMenuModel) View() string {
-	return m.list.View()
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+	content.WriteString(m.list.View())
+
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
 }
 
 // DaemonMenuModel handles daemon enable/disable
 type DaemonMenuModel struct {
 	list   list.Model
 	config *config.Config
+	width  int
+	height int
 }
 
 // NewDaemonMenuModel creates daemon toggle menu
@@ -312,7 +371,9 @@ func (m DaemonMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, msg.Height)
+		m.width = msg.Width
+		m.height = msg.Height
+		m.list.SetSize(msg.Width, msg.Height-2)
 	}
 
 	var cmd tea.Cmd
@@ -321,13 +382,43 @@ func (m DaemonMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m DaemonMenuModel) View() string {
-	return m.list.View()
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+	content.WriteString(m.list.View())
+
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
 }
 
 // LibraryMenuModel handles library path configuration
 type LibraryMenuModel struct {
 	list   list.Model
 	config *config.Config
+	width  int
+	height int
 }
 
 // NewLibraryMenuModel creates library configuration menu
@@ -385,7 +476,9 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.WindowSizeMsg:
-		m.list.SetSize(msg.Width, msg.Height)
+		m.width = msg.Width
+		m.height = msg.Height
+		m.list.SetSize(msg.Width, msg.Height-2)
 	}
 
 	var cmd tea.Cmd
@@ -394,32 +487,60 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m LibraryMenuModel) View() string {
-	var sb strings.Builder
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	// Show ASCII header
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
 
 	// Show current libraries
-	sb.WriteString(TitleStyle.Render("CURRENT LIBRARIES") + "\n\n")
+	content.WriteString(TitleStyle.Render("CURRENT LIBRARIES") + "\n\n")
 
-	sb.WriteString(InfoStyle.Render("Movies:") + "\n")
+	content.WriteString(InfoStyle.Render("Movies:") + "\n")
 	if len(m.config.Libraries.Movies.Paths) == 0 {
-		sb.WriteString(MutedStyle.Render("  (none configured)") + "\n")
+		content.WriteString(MutedStyle.Render("  (none configured)") + "\n")
 	} else {
 		for _, path := range m.config.Libraries.Movies.Paths {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
+			content.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
 		}
 	}
-	sb.WriteString("\n")
+	content.WriteString("\n")
 
-	sb.WriteString(InfoStyle.Render("TV Shows:") + "\n")
+	content.WriteString(InfoStyle.Render("TV Shows:") + "\n")
 	if len(m.config.Libraries.TV.Paths) == 0 {
-		sb.WriteString(MutedStyle.Render("  (none configured)") + "\n")
+		content.WriteString(MutedStyle.Render("  (none configured)") + "\n")
 	} else {
 		for _, path := range m.config.Libraries.TV.Paths {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
+			content.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
 		}
 	}
-	sb.WriteString("\n\n")
+	content.WriteString("\n\n")
 
-	sb.WriteString(m.list.View())
+	content.WriteString(m.list.View())
 
-	return sb.String()
+	// Wrap in padding like other menus
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
 }
