@@ -44,7 +44,21 @@ func NewMenuModel(cfg *config.Config) MenuModel {
 		MenuItem{title: "Exit", desc: "Quit jellysink"},
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	// Create delegate with RAMA theme styling
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 0, 0)
 	l.Title = "JELLYSINK MAIN MENU"
 	l.Styles.Title = TitleStyle
 
@@ -179,7 +193,21 @@ func NewFrequencyMenuModel(cfg *config.Config) FrequencyMenuModel {
 		MenuItem{title: "Back", desc: "Return to main menu"},
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	// Create delegate with RAMA theme styling
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 0, 0)
 	l.Title = "SET SCAN FREQUENCY"
 	l.Styles.Title = TitleStyle
 
@@ -239,7 +267,21 @@ func NewDaemonMenuModel(cfg *config.Config) DaemonMenuModel {
 		MenuItem{title: "Back", desc: "Return to main menu"},
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	// Create delegate with RAMA theme styling
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 0, 0)
 	l.Title = "DAEMON MANAGEMENT"
 	l.Styles.Title = TitleStyle
 
@@ -298,7 +340,21 @@ func NewLibraryMenuModel(cfg *config.Config) LibraryMenuModel {
 		MenuItem{title: "Back", desc: "Return to main menu"},
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	// Create delegate with RAMA theme styling
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 0, 0)
 	l.Title = "LIBRARY CONFIGURATION"
 	l.Styles.Title = TitleStyle
 
