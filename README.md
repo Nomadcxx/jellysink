@@ -1,106 +1,125 @@
 # jellysink
 
-Automated media library maintenance for Jellyfin/Plex. Scans for duplicates and naming compliance issues.
+Media library maintenance for Jellyfin and Plex. Finds duplicate files, validates naming conventions, and cleans up your libraries automatically.
 
-## Features
+## What it does
 
-- Duplicate detection with quality scoring
-- Jellyfin/Plex naming compliance checking
-- TUI for reviewing and cleaning
-- Automated scheduled scans via systemd
-- Comprehensive scene release pattern handling
-- Safe deletion with protected paths and size limits
+jellysink scans your media libraries to find:
+- Duplicate movies and TV episodes (keeps highest quality)
+- Files that don't match Jellyfin/Plex naming conventions
+- Scene release patterns and codec information
+
+It runs scans on a schedule and presents everything in an interactive TUI where you can review and approve deletions.
 
 ## Installation
 
+One-line install:
+
 ```bash
-# Clone the repository
+curl -sSL https://raw.githubusercontent.com/Nomadcxx/jellysink/main/install.sh | sudo bash
+```
+
+Or clone and run:
+
+```bash
 git clone https://github.com/Nomadcxx/jellysink
 cd jellysink
-
-# Run the TUI installer
-./install.sh
+sudo ./install.sh
 ```
 
-The installer will guide you through:
-- Installing binaries to `/usr/local/bin`
-- Creating configuration at `~/.config/jellysink/config.toml`
-- Setting up systemd service and timer
-
-## Configuration
-
-Create `~/.config/jellysink/config.toml`:
-
-```toml
-[libraries.movies]
-paths = ["/path/to/your/movies"]
-
-[libraries.tv]
-paths = ["/path/to/your/tvshows"]
-
-[daemon]
-scan_frequency = "weekly"  # daily, weekly, biweekly
-```
+Requirements: Go 1.21+, git
 
 ## Usage
 
-### Manual Scan
-```bash
-jellysink scan                    # Scan configured libraries
-jellysink view <report.json>      # View report in TUI
-jellysink clean <report.json>     # Clean duplicates
-jellysink config                  # Show configuration
-```
-
-### Automated Scans
-
-Enable the systemd timer for scheduled scans:
+Launch the interactive menu:
 
 ```bash
-# System-wide
-sudo systemctl enable --now jellysink.timer
-
-# User service
-systemctl --user enable --now jellysink.timer
+sudo jellysink
 ```
 
-The daemon will:
-1. Scan libraries on schedule
-2. Generate report
-3. Send desktop notification
-4. Launch TUI for review
+The TUI lets you:
+- Add and remove library paths for movies and TV shows
+- Configure scan frequency (daily, weekly, biweekly)
+- Enable or disable the automatic daemon
+- Run manual scans and view reports
+- Review duplicates and approve deletions
 
-## Naming Conventions
-
-### Movies
-```
-Movies/
-└── Movie Name (2024)/
-    └── Movie Name (2024).mkv
-```
-
-### TV Shows
-```
-TV Shows/
-└── Show Name (2010)/
-    └── Season 01/
-        └── Show Name (2010) S01E01.mkv
-```
-
-## Uninstall
+CLI commands for automation:
 
 ```bash
-./uninstall.sh
+sudo jellysink scan              # Run headless scan
+jellysink view <report>          # View a report
+sudo jellysink clean <report>    # Clean from a report
+jellysink version                # Show version
 ```
+
+The daemon runs via systemd and generates reports that launch the TUI for review. All deletions require explicit approval.
+
+## Configuration
+
+jellysink stores config at `~/.config/jellysink/config.toml`. The TUI handles all configuration through its menus, but you can edit manually if needed:
+
+```toml
+[libraries.movies]
+paths = ["/path/to/movies", "/another/path/movies"]
+
+[libraries.tv]
+paths = ["/path/to/tv"]
+
+[daemon]
+scan_frequency = "weekly"
+```
+
+## Naming conventions
+
+jellysink expects media to follow Jellyfin/Plex standards:
+
+Movies:
+```
+Movies/Movie Name (2024)/Movie Name (2024).mkv
+```
+
+TV Shows:
+```
+TV Shows/Show Name (2010)/Season 01/Show Name (2010) S01E01.mkv
+```
+
+Files that don't match get flagged in compliance reports with suggested fixes.
+
+## How duplicates work
+
+When jellysink finds multiple copies of the same content, it scores them by:
+- Resolution (4K > 1080p > 720p)
+- Codec (H.265 > H.264)
+- File size
+- Audio quality
+
+The highest-scoring file is marked as "KEEP" and others are marked for deletion. You review and approve each deletion in the TUI.
+
+## Safety features
+
+- Protected system paths (won't delete from /usr, /etc, etc.)
+- 3TB per-operation size limit
+- File ownership preservation (prevents root takeover when running with sudo)
+- Operation logging for audit trails
+- Dry-run mode for testing
+
+## Why sudo
+
+jellysink needs root privileges to:
+- Control systemd services (enable/disable the daemon)
+- Delete files from any location in your media libraries
+
+File ownership is preserved during all operations, so your libraries stay owned by your user account even when running as root.
 
 ## Development
 
 ```bash
-go test ./...      # Run tests
-make clean         # Clean build artifacts
-bd ready           # Check tasks (requires beads)
+go test ./...                    # Run tests
+go build ./cmd/jellysink/        # Build main binary
+go build ./cmd/installer/        # Build installer
 ```
 
 ## License
 
-MIT License - See LICENSE file.
+MIT
