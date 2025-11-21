@@ -751,11 +751,27 @@ func (m AddPathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
-			return NewLibraryMenuModel(m.config), nil
+			libModel := NewLibraryMenuModel(m.config)
+			libModel.width = m.width
+			libModel.height = m.height
+			listHeight := m.height - 16
+			if listHeight < 8 {
+				listHeight = 8
+			}
+			libModel.list.SetSize(m.width-4, listHeight)
+			return libModel, nil
 
 		case "esc":
 			// Cancel and return to library menu
-			return NewLibraryMenuModel(m.config), nil
+			libModel := NewLibraryMenuModel(m.config)
+			libModel.width = m.width
+			libModel.height = m.height
+			listHeight := m.height - 16
+			if listHeight < 8 {
+				listHeight = 8
+			}
+			libModel.list.SetSize(m.width-4, listHeight)
+			return libModel, nil
 
 		case "enter":
 			// Validate and add path
@@ -816,7 +832,15 @@ func (m AddPathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			// Show success and return to library menu
-			return NewLibraryMenuModel(m.config), tea.Printf("Added %s library path: %s", m.libraryType, path)
+			libModel := NewLibraryMenuModel(m.config)
+			libModel.width = m.width
+			libModel.height = m.height
+			listHeight := m.height - 16
+			if listHeight < 8 {
+				listHeight = 8
+			}
+			libModel.list.SetSize(m.width-4, listHeight)
+			return libModel, tea.Printf("Added %s library path: %s", m.libraryType, path)
 		}
 
 	case tea.WindowSizeMsg:
@@ -872,12 +896,12 @@ func (m AddPathModel) View() string {
 
 	// Error message
 	if m.err != "" {
-		content.WriteString(ErrorStyle.Render("✗ " + m.err) + "\n\n")
+		content.WriteString(ErrorStyle.Render("✗ "+m.err) + "\n\n")
 	}
 
 	// Success message
 	if m.success != "" {
-		content.WriteString(SuccessStyle.Render("✓ " + m.success) + "\n\n")
+		content.WriteString(SuccessStyle.Render("✓ "+m.success) + "\n\n")
 	}
 
 	// Help text
@@ -977,7 +1001,7 @@ func (m RemovePathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			selected := m.list.SelectedItem()
-			
+
 			// Handle Back option
 			if menuItem, ok := selected.(MenuItem); ok && menuItem.title == "Back" {
 				return NewLibraryMenuModel(m.config), nil
@@ -1154,7 +1178,7 @@ func (m ListLibrariesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport = viewport.New(msg.Width-4, msg.Height-headerHeight-footerHeight)
 			m.viewport.Style = lipgloss.NewStyle().
 				Padding(0, 1)
-			
+
 			// Set content
 			m.viewport.SetContent(m.buildLibraryList())
 			m.ready = true
