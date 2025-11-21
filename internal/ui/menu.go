@@ -167,8 +167,8 @@ func (m MenuModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	// Check if terminal is too small
-	if m.width < minWidth || m.height < minHeight {
+	// Check if terminal is too small (only after dimensions are set)
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -303,7 +303,7 @@ func (m FrequencyMenuModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -434,7 +434,7 @@ func (m DaemonMenuModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -573,7 +573,7 @@ func (m LibraryMenuModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -779,7 +779,7 @@ func (m AddPathModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -976,7 +976,7 @@ func (m RemovePathModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
@@ -1148,7 +1148,7 @@ func (m ListLibrariesModel) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	if m.width < minWidth || m.height < minHeight {
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(ColorWarning).
 			Bold(true).
