@@ -3,9 +3,11 @@ package ui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -194,6 +196,11 @@ func (m MenuModel) View() string {
 
 	// Add menu list
 	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
 
 	// Wrap in padding and border like installer
 	mainStyle := lipgloss.NewStyle().
@@ -301,6 +308,11 @@ func (m FrequencyMenuModel) View() string {
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
 	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
 
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
@@ -405,6 +417,11 @@ func (m DaemonMenuModel) View() string {
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
 	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
 
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
@@ -468,11 +485,21 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			selected := m.list.SelectedItem().(MenuItem)
-			if selected.title == "Back" {
+			switch selected.title {
+			case "Back":
 				return NewMenuModel(m.config), nil
+			case "Add Movie Library":
+				return NewAddPathModel(m.config, "movie"), nil
+			case "Add TV Library":
+				return NewAddPathModel(m.config, "tv"), nil
+			case "Remove Library":
+				return NewRemovePathModel(m.config), nil
+			case "List Libraries":
+				// Already showing in View, just stay here
+				return m, nil
+			default:
+				return m, nil
 			}
-			// TODO: Implement library path input
-			return NewMenuModel(m.config), tea.Printf("%s (text input pending)", selected.title)
 		}
 
 	case tea.WindowSizeMsg:
@@ -536,8 +563,373 @@ func (m LibraryMenuModel) View() string {
 	content.WriteString("\n\n")
 
 	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
 
 	// Wrap in padding like other menus
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// AddPathModel handles adding a library path with text input
+type AddPathModel struct {
+	textInput   textinput.Model
+	config      *config.Config
+	libraryType string // "movie" or "tv"
+	width       int
+	height      int
+	err         string
+	success     string
+}
+
+// NewAddPathModel creates a new path input model
+func NewAddPathModel(cfg *config.Config, libraryType string) AddPathModel {
+	ti := textinput.New()
+	ti.Placeholder = "/path/to/your/" + libraryType + "s"
+	ti.Focus()
+	ti.CharLimit = 500
+	ti.Width = 80
+
+	// Style the text input with RAMA theme
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(RAMARed)
+	ti.TextStyle = lipgloss.NewStyle().Foreground(RAMAForeground)
+	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(RAMAMuted)
+
+	return AddPathModel{
+		textInput:   ti,
+		config:      cfg,
+		libraryType: libraryType,
+	}
+}
+
+func (m AddPathModel) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m AddPathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return NewLibraryMenuModel(m.config), nil
+
+		case "esc":
+			// Cancel and return to library menu
+			return NewLibraryMenuModel(m.config), nil
+
+		case "enter":
+			// Validate and add path
+			path := strings.TrimSpace(m.textInput.Value())
+			if path == "" {
+				m.err = "Path cannot be empty"
+				m.success = ""
+				return m, nil
+			}
+
+			// Validate path exists
+			info, err := os.Stat(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					m.err = "Path does not exist"
+				} else {
+					m.err = fmt.Sprintf("Cannot access path: %v", err)
+				}
+				m.success = ""
+				return m, nil
+			}
+
+			// Check if it's a directory
+			if !info.IsDir() {
+				m.err = "Path must be a directory"
+				m.success = ""
+				return m, nil
+			}
+
+			// Check if path already exists in the library
+			var existingPaths []string
+			if m.libraryType == "movie" {
+				existingPaths = m.config.Libraries.Movies.Paths
+			} else {
+				existingPaths = m.config.Libraries.TV.Paths
+			}
+
+			for _, existing := range existingPaths {
+				if existing == path {
+					m.err = "Path already exists in library"
+					m.success = ""
+					return m, nil
+				}
+			}
+
+			// Add path to config
+			if m.libraryType == "movie" {
+				m.config.Libraries.Movies.Paths = append(m.config.Libraries.Movies.Paths, path)
+			} else {
+				m.config.Libraries.TV.Paths = append(m.config.Libraries.TV.Paths, path)
+			}
+
+			// Save config
+			if err := config.Save(m.config); err != nil {
+				m.err = fmt.Sprintf("Failed to save config: %v", err)
+				m.success = ""
+				return m, nil
+			}
+
+			// Show success and return to library menu
+			return NewLibraryMenuModel(m.config), tea.Printf("Added %s library path: %s", m.libraryType, path)
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+func (m AddPathModel) View() string {
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	// Show ASCII header
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	// Title
+	var title string
+	if m.libraryType == "movie" {
+		title = "ADD MOVIE LIBRARY PATH"
+	} else {
+		title = "ADD TV LIBRARY PATH"
+	}
+	content.WriteString(TitleStyle.Render(title) + "\n\n")
+
+	// Instructions
+	content.WriteString(InfoStyle.Render("Enter the full path to your library folder:") + "\n\n")
+
+	// Text input
+	content.WriteString(m.textInput.View())
+	content.WriteString("\n\n")
+
+	// Error message
+	if m.err != "" {
+		content.WriteString(ErrorStyle.Render("✗ " + m.err) + "\n\n")
+	}
+
+	// Success message
+	if m.success != "" {
+		content.WriteString(SuccessStyle.Render("✓ " + m.success) + "\n\n")
+	}
+
+	// Help text
+	content.WriteString(MutedStyle.Render("Enter: Add path  •  Esc: Cancel  •  Ctrl+C/Q: Exit"))
+
+	// Wrap in padding
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// RemovePathModel handles removing a library path
+type RemovePathModel struct {
+	list   list.Model
+	config *config.Config
+	width  int
+	height int
+}
+
+// RemovablePathItem represents a path that can be removed
+type RemovablePathItem struct {
+	path        string
+	libraryType string // "movie" or "tv"
+}
+
+func (i RemovablePathItem) FilterValue() string { return i.path }
+func (i RemovablePathItem) Title() string       { return i.path }
+func (i RemovablePathItem) Description() string {
+	if i.libraryType == "movie" {
+		return "Movie Library"
+	}
+	return "TV Library"
+}
+
+// NewRemovePathModel creates a removal selection menu
+func NewRemovePathModel(cfg *config.Config) RemovePathModel {
+	items := []list.Item{}
+
+	// Add all movie paths
+	for _, path := range cfg.Libraries.Movies.Paths {
+		items = append(items, RemovablePathItem{
+			path:        path,
+			libraryType: "movie",
+		})
+	}
+
+	// Add all TV paths
+	for _, path := range cfg.Libraries.TV.Paths {
+		items = append(items, RemovablePathItem{
+			path:        path,
+			libraryType: "tv",
+		})
+	}
+
+	// Add Back option
+	items = append(items, MenuItem{
+		title: "Back",
+		desc:  "Return to library menu",
+	})
+
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 0, 0)
+	l.Title = "Select Library Path to Remove"
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
+
+	return RemovePathModel{
+		list:   l,
+		config: cfg,
+	}
+}
+
+func (m RemovePathModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m RemovePathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			return NewLibraryMenuModel(m.config), nil
+
+		case "enter":
+			selected := m.list.SelectedItem()
+			
+			// Handle Back option
+			if menuItem, ok := selected.(MenuItem); ok && menuItem.title == "Back" {
+				return NewLibraryMenuModel(m.config), nil
+			}
+
+			// Handle path removal
+			if pathItem, ok := selected.(RemovablePathItem); ok {
+				// Remove from config
+				if pathItem.libraryType == "movie" {
+					newPaths := []string{}
+					for _, p := range m.config.Libraries.Movies.Paths {
+						if p != pathItem.path {
+							newPaths = append(newPaths, p)
+						}
+					}
+					m.config.Libraries.Movies.Paths = newPaths
+				} else {
+					newPaths := []string{}
+					for _, p := range m.config.Libraries.TV.Paths {
+						if p != pathItem.path {
+							newPaths = append(newPaths, p)
+						}
+					}
+					m.config.Libraries.TV.Paths = newPaths
+				}
+
+				// Save config
+				if err := config.Save(m.config); err != nil {
+					return NewLibraryMenuModel(m.config), tea.Printf("Failed to save: %v", err)
+				}
+
+				// Return to library menu with success message
+				return NewLibraryMenuModel(m.config), tea.Printf("Removed %s library path: %s", pathItem.libraryType, pathItem.path)
+			}
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.list.SetSize(msg.Width, msg.Height-2)
+	}
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m RemovePathModel) View() string {
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	// Show ASCII header
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	// Show warning
+	content.WriteString(WarningStyle.Render("⚠ WARNING: Removing a path will not delete any files") + "\n\n")
+
+	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Remove  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
+
+	// Wrap in padding
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
 		Width(m.width - 4)
