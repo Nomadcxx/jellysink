@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -100,8 +101,54 @@ func main() {
 	}
 }
 
+// isRunningAsRoot checks if the program is running with root privileges
+func isRunningAsRoot() bool {
+	return os.Geteuid() == 0
+}
+
+// reexecWithSudo re-executes the current command with sudo
+func reexecWithSudo() {
+	fmt.Println(ui.FormatASCIIHeader())
+	fmt.Println(ui.FormatStatusWarn("Root Access Required"))
+	fmt.Println()
+	fmt.Println("jellysink needs root access to:")
+	fmt.Println("  • Control systemd services (enable/disable daemon)")
+	fmt.Println("  • Delete media files during cleanup")
+	fmt.Println()
+	fmt.Println(ui.MutedStyle.Render("You will be prompted for your password..."))
+	fmt.Println()
+
+	// Get the current executable path
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Unable to determine executable path: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Build the sudo command with all original arguments
+	args := append([]string{exe}, os.Args[1:]...)
+	cmd := exec.Command("sudo", args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// Execute with sudo
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to execute with sudo: %v\n", err)
+		os.Exit(1)
+	}
+
+	os.Exit(0)
+}
+
 // runTUI launches the main menu TUI (default behavior)
 func runTUI(cmd *cobra.Command, args []string) {
+	// Check for root access and re-exec with sudo if needed
+	if !isRunningAsRoot() {
+		reexecWithSudo()
+		return
+	}
+
 	// Load config
 	cfg, err := loadConfig()
 	if err != nil {
@@ -124,6 +171,12 @@ func runTUI(cmd *cobra.Command, args []string) {
 }
 
 func runScan(cmd *cobra.Command, args []string) {
+	// Check for root access
+	if !isRunningAsRoot() {
+		reexecWithSudo()
+		return
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
@@ -188,6 +241,12 @@ func runView(cmd *cobra.Command, args []string) {
 }
 
 func runClean(cmd *cobra.Command, args []string) {
+	// Check for root access (unless dry-run)
+	if !dryRun && !isRunningAsRoot() {
+		reexecWithSudo()
+		return
+	}
+
 	reportPath := args[0]
 
 	report, err := loadReport(reportPath)
