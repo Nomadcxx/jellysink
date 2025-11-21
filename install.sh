@@ -1,29 +1,56 @@
 #!/bin/bash
-# jellysink installation script
-# Builds and runs the TUI installer
-
 set -e
 
-echo "jellysink installer"
-echo
+# jellysink Installer Script
+# Downloads and runs the jellysink installer
+# Usage: curl -sSL https://raw.githubusercontent.com/Nomadcxx/jellysink/main/install.sh | sudo bash
 
-# Check for Go
-if ! command -v go &> /dev/null; then
-    echo "Error: Go is not installed or not in PATH"
-    echo "Please install Go from https://golang.org/dl/"
+echo "jellysink Installer"
+echo "==================="
+echo ""
+
+# Check for root
+if [ "$EUID" -ne 0 ]; then
+    echo "Error: This installer requires root privileges."
+    echo "Please run with sudo:"
+    echo "  curl -sSL https://raw.githubusercontent.com/Nomadcxx/jellysink/main/install.sh | sudo bash"
     exit 1
 fi
 
-# Build the installer
+# Check dependencies
+echo "Checking dependencies..."
+if ! command -v go &> /dev/null; then
+    echo "Error: Go is not installed. Please install Go 1.21+ first."
+    echo "  https://golang.org/dl/"
+    exit 1
+fi
+
+if ! command -v git &> /dev/null; then
+    echo "Error: git is not installed. Please install git first."
+    exit 1
+fi
+
+# Create temp directory
+TEMP_DIR=$(mktemp -d)
+cd "$TEMP_DIR"
+
+echo "Downloading jellysink..."
+git clone --depth 1 https://github.com/Nomadcxx/jellysink.git
+cd jellysink
+
 echo "Building installer..."
-go build -o install-jellysink ./cmd/installer/
+go build -o jellysink-installer ./cmd/installer/
+
+echo ""
+echo "Starting installer..."
+echo ""
 
 # Run the installer
-echo "Running installer..."
-sudo ./install-jellysink
+./jellysink-installer
 
 # Cleanup
-rm -f install-jellysink
+cd /
+rm -rf "$TEMP_DIR"
 
-echo
+echo ""
 echo "Installation complete!"
