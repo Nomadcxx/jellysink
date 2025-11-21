@@ -29,12 +29,13 @@ func (i MenuItem) FilterValue() string { return i.title }
 
 // MenuModel represents the main menu TUI
 type MenuModel struct {
-	list   list.Model
-	config *config.Config
-	width  int
-	height int
-	ctx    context.Context
-	cancel context.CancelFunc
+	list       list.Model
+	config     *config.Config
+	width      int
+	height     int
+	ctx        context.Context
+	cancel     context.CancelFunc
+	showStatus bool // Show config status popup
 }
 
 // NewMenuModel creates a new main menu
@@ -96,6 +97,18 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancel()
 			return m, tea.Quit
 
+		case "i", "s":
+			// Toggle status popup with 'i' (info) or 's' (status)
+			m.showStatus = !m.showStatus
+			return m, nil
+
+		case "esc":
+			// Close status popup if open
+			if m.showStatus {
+				m.showStatus = false
+				return m, nil
+			}
+
 		case "enter":
 			selected := m.list.SelectedItem().(MenuItem)
 			return m.handleSelection(selected.title)
@@ -105,10 +118,10 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		// Calculate list height after accounting for other content:
-		// ASCII header (9 lines) + spacing (2) + config status (5) + spacing (1) + footer (3) + padding (2) = 22 lines
-		listHeight := msg.Height - 22
-		if listHeight < 6 {
-			listHeight = 6 // Minimum list height
+		// ASCII header (9 lines) + spacing (2) + footer (3) + padding (2) = 16 lines
+		listHeight := msg.Height - 16
+		if listHeight < 8 {
+			listHeight = 8
 		}
 		m.list.SetSize(msg.Width-4, listHeight)
 		return m, nil
@@ -195,11 +208,43 @@ func (m MenuModel) View() string {
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
 
-	// Show config status
-	content.WriteString(InfoStyle.Render("Configuration Status:") + "\n")
-	content.WriteString(fmt.Sprintf("  Movie libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.Movies.Paths)))))
-	content.WriteString(fmt.Sprintf("  TV libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.TV.Paths)))))
-	content.WriteString(fmt.Sprintf("  Scan frequency: %s\n", SuccessStyle.Render(m.config.Daemon.ScanFrequency)))
+	// Add menu list
+	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  I/S: Status  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
+
+	// Wrap in padding
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	mainView := mainStyle.Render(content.String())
+
+	// If status popup is showing, overlay it on top
+	if m.showStatus {
+		return m.renderWithStatusPopup(mainView)
+	}
+
+	return mainView
+}
+
+// renderWithStatusPopup overlays the status popup on the main view
+func (m MenuModel) renderWithStatusPopup(baseView string) string {
+	// Build status popup content
+	var popup strings.Builder
+
+	popup.WriteString(TitleStyle.Render("CONFIGURATION STATUS") + "\n\n")
+
+	popup.WriteString(InfoStyle.Render("Libraries:") + "\n")
+	popup.WriteString(fmt.Sprintf("  Movie paths: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.Movies.Paths)))))
+	popup.WriteString(fmt.Sprintf("  TV paths: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.TV.Paths)))))
+	popup.WriteString("\n")
+
+	popup.WriteString(InfoStyle.Render("Daemon:") + "\n")
+	popup.WriteString(fmt.Sprintf("  Scan frequency: %s\n", SuccessStyle.Render(m.config.Daemon.ScanFrequency)))
 
 	// Show daemon status
 	daemonStatus := getDaemonStatusString()
@@ -211,23 +256,23 @@ func (m MenuModel) View() string {
 	} else {
 		statusStyle = WarningStyle
 	}
-	content.WriteString(fmt.Sprintf("  Daemon status: %s\n", statusStyle.Render(daemonStatus)))
-	content.WriteString("\n")
+	popup.WriteString(fmt.Sprintf("  Status: %s\n", statusStyle.Render(daemonStatus)))
 
-	// Add menu list
-	content.WriteString(m.list.View())
-	content.WriteString("\n\n")
+	// Create bordered popup (sysc-greet style)
+	popupStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(RAMARed).
+		Background(RAMABackground).
+		Padding(2, 4)
 
-	// Footer help text
-	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Q/Ctrl+C: Quit")
-	content.WriteString(footer)
+	popupBox := popupStyle.Render(popup.String())
 
-	// Wrap in padding and border like installer
-	mainStyle := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(m.width - 4) // Account for padding
+	// Add help text for closing popup
+	closeHelp := MutedStyle.Render("Press I/S or Esc to close")
+	popupWithHelp := popupBox + "\n" + lipgloss.NewStyle().Align(lipgloss.Center).Width(lipgloss.Width(popupBox)).Render(closeHelp)
 
-	return mainStyle.Render(content.String())
+	// Center popup on screen using Place
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popupWithHelp)
 }
 
 // FrequencyMenuModel handles scan frequency configuration
@@ -576,10 +621,10 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// ASCII header (9) + title (1) + library preview (15) + footer (3) + padding (2) = 30 lines
-		listHeight := msg.Height - 30
-		if listHeight < 5 {
-			listHeight = 5
+		// ASCII header (9) + spacing (2) + footer (3) + padding (2) = 16 lines
+		listHeight := msg.Height - 16
+		if listHeight < 8 {
+			listHeight = 8
 		}
 		m.list.SetSize(msg.Width-4, listHeight)
 	}
@@ -615,52 +660,7 @@ func (m LibraryMenuModel) View() string {
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
 
-	// Show current libraries (limited preview)
-	content.WriteString(TitleStyle.Render("CURRENT LIBRARIES") + "\n\n")
-
-	const maxPreview = 3 // Show max 3 paths per library type
-
-	content.WriteString(InfoStyle.Render("Movies:") + "\n")
-	if len(m.config.Libraries.Movies.Paths) == 0 {
-		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
-	} else {
-		showCount := len(m.config.Libraries.Movies.Paths)
-		if showCount > maxPreview {
-			showCount = maxPreview
-		}
-		for i := 0; i < showCount; i++ {
-			content.WriteString("  " + FormatStatusOK(m.config.Libraries.Movies.Paths[i]) + "\n")
-		}
-		if len(m.config.Libraries.Movies.Paths) > maxPreview {
-			remaining := len(m.config.Libraries.Movies.Paths) - maxPreview
-			content.WriteString("  " + MutedStyle.Render(fmt.Sprintf("...and %d more", remaining)) + "\n")
-		}
-	}
-	content.WriteString("\n")
-
-	content.WriteString(InfoStyle.Render("TV Shows:") + "\n")
-	if len(m.config.Libraries.TV.Paths) == 0 {
-		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
-	} else {
-		showCount := len(m.config.Libraries.TV.Paths)
-		if showCount > maxPreview {
-			showCount = maxPreview
-		}
-		for i := 0; i < showCount; i++ {
-			content.WriteString("  " + FormatStatusOK(m.config.Libraries.TV.Paths[i]) + "\n")
-		}
-		if len(m.config.Libraries.TV.Paths) > maxPreview {
-			remaining := len(m.config.Libraries.TV.Paths) - maxPreview
-			content.WriteString("  " + MutedStyle.Render(fmt.Sprintf("...and %d more", remaining)) + "\n")
-		}
-	}
-
-	if len(m.config.Libraries.Movies.Paths) > maxPreview || len(m.config.Libraries.TV.Paths) > maxPreview {
-		content.WriteString("\n")
-		content.WriteString(MutedStyle.Render("  Select 'List Libraries' to see all paths"))
-	}
-	content.WriteString("\n\n")
-
+	// Show menu list directly (library preview removed - use "List Libraries" option instead)
 	content.WriteString(m.list.View())
 	content.WriteString("\n\n")
 
