@@ -1,4 +1,4 @@
-# jellysink
+![jellysink](assets/jellysink-header.png)
 
 Media library maintenance for Jellyfin and Plex. Finds duplicate files, validates naming conventions, and cleans up your libraries automatically.
 

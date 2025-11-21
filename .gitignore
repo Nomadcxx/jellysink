@@ -2,6 +2,7 @@
 /jellysink
 /jellysinkd
 /install-jellysink
+/installer
 *.exe
 *.exe~
 *.dll

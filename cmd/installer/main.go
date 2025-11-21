@@ -32,7 +32,7 @@ var (
 	checkMark   = lipgloss.NewStyle().Foreground(Accent).SetString("[OK]")
 	failMark    = lipgloss.NewStyle().Foreground(ErrorColor).SetString("[FAIL]")
 	skipMark    = lipgloss.NewStyle().Foreground(WarningColor).SetString("[SKIP]")
-	headerStyle = lipgloss.NewStyle().Foreground(Primary).Bold(true)
+	headerStyle = lipgloss.NewStyle().Foreground(Primary).Bold(true).Background(BgBase)
 )
 
 type installStep int
@@ -252,8 +252,8 @@ func (m model) View() string {
 	const minWidth = 100
 	const minHeight = 25
 
-	// Check if terminal is too small
-	if m.width < minWidth || m.height < minHeight {
+	// Check if terminal is too small (only after dimensions are set)
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
 		warningStyle := lipgloss.NewStyle().
 			Foreground(WarningColor).
 			Bold(true).
