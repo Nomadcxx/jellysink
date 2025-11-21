@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -550,8 +551,7 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "Remove Library":
 				return NewRemovePathModel(m.config), nil
 			case "List Libraries":
-				// Already showing in View, just stay here
-				return m, nil
+				return NewListLibrariesModel(m.config), nil
 			default:
 				return m, nil
 			}
@@ -594,15 +594,25 @@ func (m LibraryMenuModel) View() string {
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
 
-	// Show current libraries
+	// Show current libraries (limited preview)
 	content.WriteString(TitleStyle.Render("CURRENT LIBRARIES") + "\n\n")
+
+	const maxPreview = 3 // Show max 3 paths per library type
 
 	content.WriteString(InfoStyle.Render("Movies:") + "\n")
 	if len(m.config.Libraries.Movies.Paths) == 0 {
 		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
 	} else {
-		for _, path := range m.config.Libraries.Movies.Paths {
-			content.WriteString("  " + FormatStatusOK(path) + "\n")
+		showCount := len(m.config.Libraries.Movies.Paths)
+		if showCount > maxPreview {
+			showCount = maxPreview
+		}
+		for i := 0; i < showCount; i++ {
+			content.WriteString("  " + FormatStatusOK(m.config.Libraries.Movies.Paths[i]) + "\n")
+		}
+		if len(m.config.Libraries.Movies.Paths) > maxPreview {
+			remaining := len(m.config.Libraries.Movies.Paths) - maxPreview
+			content.WriteString("  " + MutedStyle.Render(fmt.Sprintf("...and %d more", remaining)) + "\n")
 		}
 	}
 	content.WriteString("\n")
@@ -611,9 +621,22 @@ func (m LibraryMenuModel) View() string {
 	if len(m.config.Libraries.TV.Paths) == 0 {
 		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
 	} else {
-		for _, path := range m.config.Libraries.TV.Paths {
-			content.WriteString("  " + FormatStatusOK(path) + "\n")
+		showCount := len(m.config.Libraries.TV.Paths)
+		if showCount > maxPreview {
+			showCount = maxPreview
 		}
+		for i := 0; i < showCount; i++ {
+			content.WriteString("  " + FormatStatusOK(m.config.Libraries.TV.Paths[i]) + "\n")
+		}
+		if len(m.config.Libraries.TV.Paths) > maxPreview {
+			remaining := len(m.config.Libraries.TV.Paths) - maxPreview
+			content.WriteString("  " + MutedStyle.Render(fmt.Sprintf("...and %d more", remaining)) + "\n")
+		}
+	}
+
+	if len(m.config.Libraries.Movies.Paths) > maxPreview || len(m.config.Libraries.TV.Paths) > maxPreview {
+		content.WriteString("\n")
+		content.WriteString(MutedStyle.Render("  Select 'List Libraries' to see all paths"))
 	}
 	content.WriteString("\n\n")
 
@@ -1028,4 +1051,144 @@ func boolToStatus(active bool) string {
 		return "Active"
 	}
 	return "Inactive"
+}
+
+// ListLibrariesModel shows all library paths in a scrollable viewport
+type ListLibrariesModel struct {
+	viewport viewport.Model
+	config   *config.Config
+	width    int
+	height   int
+	ready    bool
+}
+
+// NewListLibrariesModel creates a new list libraries view with scrolling
+func NewListLibrariesModel(cfg *config.Config) ListLibrariesModel {
+	return ListLibrariesModel{
+		config: cfg,
+		ready:  false,
+	}
+}
+
+func (m ListLibrariesModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m ListLibrariesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			return NewLibraryMenuModel(m.config), nil
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+
+		if !m.ready {
+			// Initialize viewport with content
+			headerHeight := 15 // ASCII header + title + padding
+			footerHeight := 4  // Help text + padding
+			m.viewport = viewport.New(msg.Width-4, msg.Height-headerHeight-footerHeight)
+			m.viewport.Style = lipgloss.NewStyle().
+				Padding(0, 1)
+			
+			// Set content
+			m.viewport.SetContent(m.buildLibraryList())
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width - 4
+			m.viewport.Height = msg.Height - 19
+		}
+	}
+
+	// Update viewport
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+func (m ListLibrariesModel) buildLibraryList() string {
+	var b strings.Builder
+
+	b.WriteString(InfoStyle.Render("Movie Libraries:") + "\n\n")
+	if len(m.config.Libraries.Movies.Paths) == 0 {
+		b.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
+	} else {
+		for i, path := range m.config.Libraries.Movies.Paths {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, FormatStatusOK(path)))
+		}
+	}
+	b.WriteString("\n")
+
+	b.WriteString(InfoStyle.Render("TV Show Libraries:") + "\n\n")
+	if len(m.config.Libraries.TV.Paths) == 0 {
+		b.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
+	} else {
+		for i, path := range m.config.Libraries.TV.Paths {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, FormatStatusOK(path)))
+		}
+	}
+
+	totalPaths := len(m.config.Libraries.Movies.Paths) + len(m.config.Libraries.TV.Paths)
+	b.WriteString("\n")
+	b.WriteString(MutedStyle.Render(fmt.Sprintf("Total: %d configured path(s)", totalPaths)))
+
+	return b.String()
+}
+
+func (m ListLibrariesModel) View() string {
+	if !m.ready {
+		return "Initializing..."
+	}
+
+	// Minimum dimensions check
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	// Show ASCII header
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	// Title
+	content.WriteString(TitleStyle.Render("ALL LIBRARY PATHS") + "\n\n")
+
+	// Scrollable viewport with all paths
+	content.WriteString(m.viewport.View())
+	content.WriteString("\n\n")
+
+	// Scroll progress indicator
+	scrollPercent := fmt.Sprintf("%.0f%%", m.viewport.ScrollPercent()*100)
+	scrollInfo := MutedStyle.Render(fmt.Sprintf("Scroll: %s", scrollPercent))
+	content.WriteString(scrollInfo + "\n")
+
+	// Footer help text
+	footer := MutedStyle.Render("↑/↓/PgUp/PgDn: Scroll  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
+
+	// Wrap in padding
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
 }
