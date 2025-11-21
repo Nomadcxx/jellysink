@@ -11,6 +11,13 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
 
+const (
+	// MaxTopOffenders is the maximum number of top duplicate groups to show
+	MaxTopOffenders = 15
+	// MaxExampleOffenders is the number of example offenders to show in summary
+	MaxExampleOffenders = 5
+)
+
 // Report represents a scan report with duplicates and compliance issues
 type Report struct {
 	Timestamp          time.Time
@@ -192,7 +199,7 @@ type Offender struct {
 	SpaceToFree int64
 }
 
-// GetTopOffenders returns top 15 duplicate groups by space saved
+// GetTopOffenders returns top duplicate groups by space saved (up to MaxTopOffenders)
 func GetTopOffenders(report Report) []Offender {
 	var offenders []Offender
 
@@ -236,9 +243,9 @@ func GetTopOffenders(report Report) []Offender {
 		return offenders[i].SpaceToFree > offenders[j].SpaceToFree
 	})
 
-	// Return top 15
-	if len(offenders) > 15 {
-		return offenders[:15]
+	// Return top N offenders
+	if len(offenders) > MaxTopOffenders {
+		return offenders[:MaxTopOffenders]
 	}
 	return offenders
 }
@@ -330,9 +337,9 @@ func buildSummaryReport(report Report) string {
 	sb.WriteString(fmt.Sprintf("Space to free: %s\n\n", formatBytes(report.SpaceToFree)))
 
 	if report.TotalDuplicates > 0 {
-		sb.WriteString("Examples (top 5 by space):\n")
+		sb.WriteString(fmt.Sprintf("Examples (top %d by space):\n", MaxExampleOffenders))
 		topOffenders := GetTopOffenders(report)
-		limit := 5
+		limit := MaxExampleOffenders
 		if len(topOffenders) < limit {
 			limit = len(topOffenders)
 		}
@@ -349,8 +356,8 @@ func buildSummaryReport(report Report) string {
 	sb.WriteString(fmt.Sprintf("Files/folders to rename: %d\n\n", len(report.ComplianceIssues)))
 
 	if len(report.ComplianceIssues) > 0 {
-		sb.WriteString("Examples (first 5):\n")
-		limit := 5
+		sb.WriteString(fmt.Sprintf("Examples (first %d):\n", MaxExampleOffenders))
+		limit := MaxExampleOffenders
 		if len(report.ComplianceIssues) < limit {
 			limit = len(report.ComplianceIssues)
 		}

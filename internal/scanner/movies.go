@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+const (
+	// MaxMovieSizeScoreGB is the maximum file size in GB that contributes to scoring
+	MaxMovieSizeScoreGB = 50
+)
+
 // MovieDuplicate represents a group of duplicate movies
 type MovieDuplicate struct {
 	NormalizedName string      // Normalized movie name for grouping
@@ -173,10 +178,10 @@ func scoreMovieFile(file MovieFile) int {
 	}
 
 	// Size scoring (larger is better, up to reasonable limit)
-	// Add 1 point per GB, capped at 50GB
+	// Add 1 point per GB, capped at MaxMovieSizeScoreGB
 	sizeGB := file.Size / (1024 * 1024 * 1024)
-	if sizeGB > 50 {
-		sizeGB = 50
+	if sizeGB > MaxMovieSizeScoreGB {
+		sizeGB = MaxMovieSizeScoreGB
 	}
 	score += int(sizeGB)
 

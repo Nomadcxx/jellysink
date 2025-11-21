@@ -1,6 +1,7 @@
-# Binaries
-jellysink
-jellysinkd
+# Binaries (root level only)
+/jellysink
+/jellysinkd
+/install-jellysink
 *.exe
 *.exe~
 *.dll
@@ -46,6 +47,7 @@ scan_results/
 # Claude and AI-related files (do not commit)
 CLAUDE.md
 AGENTS.md
+AUDIT_ISSUES.md
 
 # Config files (may contain sensitive paths)
 config.toml

@@ -1,13 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Nomadcxx/jellysink/internal/config"
 	"github.com/Nomadcxx/jellysink/internal/daemon"
 	"github.com/Nomadcxx/jellysink/internal/reporter"
+)
+
+var (
+	// Version information (set via -ldflags during build)
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
 )
 
 func main() {
@@ -25,13 +35,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create context with cancellation support
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\njellysinkd: Cancelling scan...")
+		cancel()
+	}()
+
 	// Create daemon instance
 	d := daemon.New(cfg)
 
 	// Run scan
 	fmt.Println("jellysinkd: Starting scheduled scan...")
-	reportPath, err := d.RunScan()
+	reportPath, err := d.RunScan(ctx)
 	if err != nil {
+		if err == context.Canceled {
+			fmt.Fprintf(os.Stderr, "Scan cancelled by signal\n")
+			os.Exit(130) // Exit code 130 for SIGINT
+		}
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
 	}
