@@ -151,13 +151,28 @@ func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 		return m, m.viewLastReport
 
 	case "Configure Frequency":
-		return NewFrequencyMenuModel(m.config), nil
+		freqModel := NewFrequencyMenuModel(m.config)
+		freqModel.width = m.width
+		freqModel.height = m.height
+		return freqModel, nil
 
 	case "Enable/Disable Daemon":
-		return NewDaemonMenuModel(m.config), nil
+		daemonModel := NewDaemonMenuModel(m.config)
+		daemonModel.width = m.width
+		daemonModel.height = m.height
+		return daemonModel, nil
 
 	case "Configure Libraries":
-		return NewLibraryMenuModel(m.config), nil
+		libModel := NewLibraryMenuModel(m.config)
+		libModel.width = m.width
+		libModel.height = m.height
+		// Set initial list size
+		listHeight := m.height - 16
+		if listHeight < 8 {
+			listHeight = 8
+		}
+		libModel.list.SetSize(m.width-4, listHeight)
+		return libModel, nil
 
 	case "Exit":
 		m.cancel()
@@ -606,13 +621,31 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "Back":
 				return NewMenuModel(m.config), nil
 			case "Add Movie Library":
-				return NewAddPathModel(m.config, "movie"), nil
+				addModel := NewAddPathModel(m.config, "movie")
+				addModel.width = m.width
+				addModel.height = m.height
+				return addModel, nil
 			case "Add TV Library":
-				return NewAddPathModel(m.config, "tv"), nil
+				addModel := NewAddPathModel(m.config, "tv")
+				addModel.width = m.width
+				addModel.height = m.height
+				return addModel, nil
 			case "Remove Library":
-				return NewRemovePathModel(m.config), nil
+				removeModel := NewRemovePathModel(m.config)
+				removeModel.width = m.width
+				removeModel.height = m.height
+				// Set initial list size for remove model
+				listHeight := m.height - 16
+				if listHeight < 8 {
+					listHeight = 8
+				}
+				removeModel.list.SetSize(m.width-4, listHeight)
+				return removeModel, nil
 			case "List Libraries":
-				return NewListLibrariesModel(m.config), nil
+				listModel := NewListLibrariesModel(m.config)
+				listModel.width = m.width
+				listModel.height = m.height
+				return listModel, nil
 			default:
 				return m, nil
 			}
