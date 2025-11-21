@@ -248,6 +248,26 @@ func (m model) View() string {
 		return "Loading..."
 	}
 
+	// Minimum dimensions for ASCII art: 100 width x 25 height
+	const minWidth = 100
+	const minHeight = 25
+
+	// Check if terminal is too small
+	if m.width < minWidth || m.height < minHeight {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(WarningColor).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
 	var content strings.Builder
 
 	// ASCII Header from /home/nomadx/bit/JELLYSINK.txt
@@ -456,20 +476,31 @@ func (m model) renderComplete() string {
 			// Next steps
 			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Get Started:"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  jellysink"))
+			b.WriteString(lipgloss.NewStyle().Foreground(Accent).Render("  sudo jellysink"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("  ↳ Interactive TUI to configure libraries, set scan frequency,"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("  ↳ Launch interactive TUI with full menu system:"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("    enable daemon, and run scans/cleans"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("    • Add/remove movie and TV library paths"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("    • Configure scan frequency (daily/weekly/biweekly)"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("    • Enable/disable automatic daemon"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("    • Run manual scans and view reports"))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("    • Clean duplicates and fix compliance issues"))
 			b.WriteString("\n\n")
 
-			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Command Line Options (optional):"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgSecondary).Render("Note: sudo required for systemd control and file operations"))
+			b.WriteString("\n\n")
+
+			b.WriteString(lipgloss.NewStyle().Foreground(Primary).Bold(true).Render("Command Line (for automation):"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink scan              - Run manual scan"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  sudo jellysink scan         - Run headless scan"))
 			b.WriteString("\n")
 			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink view <report>     - View scan report"))
 			b.WriteString("\n")
-			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink clean <report>    - Clean from report"))
+			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  sudo jellysink clean <...>  - Clean from report"))
 			b.WriteString("\n")
 			b.WriteString(lipgloss.NewStyle().Foreground(FgMuted).Render("  jellysink version           - Show version info"))
 		}
