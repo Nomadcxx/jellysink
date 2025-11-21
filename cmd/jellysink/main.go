@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -19,6 +22,11 @@ import (
 var (
 	cfgFile string
 	dryRun  bool
+
+	// Version information (set via -ldflags during build)
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
 )
 
 const exampleConfig = `[libraries.movies]
@@ -63,6 +71,16 @@ var configCmd = &cobra.Command{
 	Run:   runConfig,
 }
 
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Show version information",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Printf("jellysink %s\n", version)
+		fmt.Printf("  Commit:     %s\n", commit)
+		fmt.Printf("  Built:      %s\n", buildTime)
+	},
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/jellysink/config.toml)")
 	cleanCmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be deleted without actually deleting")
@@ -71,6 +89,7 @@ func init() {
 	rootCmd.AddCommand(viewCmd)
 	rootCmd.AddCommand(cleanCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(versionCmd)
 }
 
 func main() {
@@ -87,10 +106,27 @@ func runScan(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Create context with cancellation support (Ctrl+C)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Handle interrupt signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Println("\nCancelling scan...")
+		cancel()
+	}()
+
 	fmt.Println("Starting scan...")
 	d := daemon.New(cfg)
-	reportPath, err := d.RunScan()
+	reportPath, err := d.RunScan(ctx)
 	if err != nil {
+		if err == context.Canceled {
+			fmt.Fprintf(os.Stderr, "Scan cancelled by user\n")
+			os.Exit(130) // Exit code 130 for SIGINT
+		}
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -149,7 +185,7 @@ func runConfig(cmd *cobra.Command, args []string) {
 		fmt.Println("Config file does not exist. Create it with:")
 		fmt.Println("\n  mkdir -p ~/.config/jellysink")
 		fmt.Println("  cat > ~/.config/jellysink/config.toml <<EOF")
-		fmt.Println(exampleConfig)
+		fmt.Print(exampleConfig)
 		fmt.Println("EOF")
 		return
 	}

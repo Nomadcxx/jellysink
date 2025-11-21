@@ -4,7 +4,108 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
+
+// Pre-compiled regexes for performance optimization
+var (
+	releasePatterns       []*regexp.Regexp
+	collapseSpacesRegex   *regexp.Regexp
+	removePunctRegex      *regexp.Regexp
+	yearParenRegex        *regexp.Regexp
+	yearBracketRegex      *regexp.Regexp
+	yearDotRegex          *regexp.Regexp
+	yearSpaceRegex        *regexp.Regexp
+	yearRemoveRegexes     []*regexp.Regexp
+	episodeSERegex        *regexp.Regexp
+	episodeXRegex         *regexp.Regexp
+)
+
+func init() {
+	// Pre-compile all release group patterns
+	patterns := []string{
+		// Resolution markers
+		`\b\d{3,4}[pi]\b`,  // 1080p, 720p, 2160p, 480i, 576i
+		`\b(4K|UHD)\b`,     // 4K, UHD
+
+		// HDR formats (before generic HDR to catch specific variants)
+		`\b(HDR10\+?|HDR10Plus|Dolby\s?Vision|DoVi|DV|HDR|HLG|PQ|SDR)\b`,
+
+		// Audio formats with channels (most specific first)
+		`\b(DTS-HD\s?MA|DTS-HD\s?HRA|DTS-HD|DTS-X|DTS-ES)\b`,  // DTS variants
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                  // Audio with channels
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                        // Audio without channels
+		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,            // Other audio codecs
+
+		// Audio channels (after audio codecs)
+		`\b\d\s\d\b`,        // 7 1, 5 1, 2 0
+		`\b(Stereo|Mono)\b`,
+
+		// Source types
+		`\b(BluRay|Blu-ray|BDRip|BRRip|REMUX|WEB-DL|WEBDL|WEBRip|WEB)\b`,
+		`\b(HDTV|PDTV|SDTV|DVDRip|DVD|DVDSCR)\b`,
+		`\b(CAM|HDTS|TS|TC|SCR|R5)\b`,
+
+		// Streaming platforms
+		`\b(AMZN|NF|DSNP|HMAX|HULU|ATVP|PCOK|PMTP)\b`,
+
+		// Video codecs
+		`\bH\s26[456]\b`,  // H 264, H 265, H 266
+		`\b(x264|x265|x266|HEVC|AVC|AV1)\b`,
+		`\b(XviD|DivX|MPEG2|VC-1|VP9)\b`,
+
+		// Special editions
+		`\b(IMAX\s?Enhanced|IMAX|Remastered|REMASTERED)\b`,
+		`\b(Directors\s?Cut|DC|Theatrical|UNCUT|Criterion)\b`,
+
+		// Multi-language
+		`\b(MULTI|DUAL|DL|DUBBED|SUBBED)\b`,
+
+		// Release tags
+		`\b(PROPER|REPACK|iNTERNAL|INTERNAL|LiMiTED|LIMITED|UNRATED|EXTENDED)\b`,
+
+		// Version tags
+		`\bv\d+\b`,  // v2, v3, v4
+
+		// Release group suffix
+		`\s?-\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,
+
+		// Bracketed content
+		`\[.*?\]`,
+	}
+
+	releasePatterns = make([]*regexp.Regexp, 0, len(patterns))
+	for _, pattern := range patterns {
+		releasePatterns = append(releasePatterns, regexp.MustCompile(`(?i)`+pattern))
+	}
+
+	// Pre-compile commonly used regexes
+	collapseSpacesRegex = regexp.MustCompile(`\s+`)
+	removePunctRegex = regexp.MustCompile(`[^\w\s]`)
+	yearParenRegex = regexp.MustCompile(`\((\d{4})\)`)
+	yearBracketRegex = regexp.MustCompile(`\[(\d{4})\]`)
+	yearDotRegex = regexp.MustCompile(`\.(\d{4})\.`)
+	yearSpaceRegex = regexp.MustCompile(`\s(\d{4})(?:\s|$)`)
+
+	// Year removal regexes (without capture groups)
+	yearRemovePatterns := []string{
+		`\(\d{4}\)`,  // (2025)
+		`\[\d{4}\]`,  // [2025]
+		`\.\d{4}\.`,  // .2025.
+		`\s\d{4}\s`,  // " 2025 "
+		`^\d{4}\s`,   // "2025 " at start
+		`\s\d{4}$`,   // " 2025" at end
+	}
+	yearRemoveRegexes = make([]*regexp.Regexp, 0, len(yearRemovePatterns))
+	for _, pattern := range yearRemovePatterns {
+		yearRemoveRegexes = append(yearRemoveRegexes, regexp.MustCompile(pattern))
+	}
+
+	episodeSERegex = regexp.MustCompile(`[Ss](\d{1,2})[Ee](\d{1,2})`)
+	episodeXRegex = regexp.MustCompile(`(\d{1,2})x(\d{1,2})`)
+}
 
 // NormalizeName normalizes a media name for fuzzy matching
 // Handles case, punctuation, roman numerals, word substitutions
@@ -47,28 +148,26 @@ func NormalizeName(name string) string {
 	}
 
 	// Remove punctuation (keep only alphanumeric and spaces)
-	re := regexp.MustCompile(`[^\w\s]`)
-	name = re.ReplaceAllString(name, " ")
+	name = removePunctRegex.ReplaceAllString(name, " ")
 
 	// Collapse multiple spaces
-	re = regexp.MustCompile(`\s+`)
-	name = re.ReplaceAllString(name, " ")
+	name = collapseSpacesRegex.ReplaceAllString(name, " ")
 
 	return strings.TrimSpace(name)
 }
 
 // ExtractYear extracts year from various formats
+// Uses pre-compiled regexes for performance
 func ExtractYear(name string) string {
-	// Try different year patterns
-	patterns := []string{
-		`\((\d{4})\)`,       // (2025)
-		`\[(\d{4})\]`,       // [2025]
-		`\.(\d{4})\.`,       // .2025.
-		`\s(\d{4})(?:\s|$)`, // 2025 (with space)
+	// Try different year patterns (in order of specificity)
+	yearRegexes := []*regexp.Regexp{
+		yearParenRegex,   // (2025)
+		yearBracketRegex, // [2025]
+		yearDotRegex,     // .2025.
+		yearSpaceRegex,   // 2025 (with space)
 	}
 
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	for _, re := range yearRegexes {
 		matches := re.FindStringSubmatch(name)
 		if len(matches) > 1 {
 			return matches[1]
@@ -79,20 +178,10 @@ func ExtractYear(name string) string {
 }
 
 // removeYear removes year from name (helper for NormalizeName)
+// Uses pre-compiled regexes for performance
 func removeYear(name string) string {
-	// Remove year in various formats
-	// Use more precise patterns to avoid matching resolution numbers
-	patterns := []string{
-		`\(\d{4}\)`,           // (2025)
-		`\[\d{4}\]`,           // [2025]
-		`\.\d{4}\.`,           // .2025. (must have dots on both sides)
-		`\s\d{4}\s`,           // " 2025 " (spaces on both sides)
-		`^\d{4}\s`,            // "2025 " at start
-		`\s\d{4}$`,            // " 2025" at end
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(pattern)
+	// Apply all year removal patterns
+	for _, re := range yearRemoveRegexes {
 		name = re.ReplaceAllString(name, "")
 	}
 
@@ -121,75 +210,19 @@ func ExtractResolution(name string) string {
 }
 
 // StripReleaseGroup removes release group markers from name
+// Uses pre-compiled regexes for performance
 func StripReleaseGroup(name string) string {
 	// Replace dots and underscores with spaces FIRST
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
 
-	// Remove all scene release markers (comprehensive list)
-	// NOTE: Dots have been replaced with spaces at this point
-	// Order matters: more specific patterns first to avoid partial matches
-	patterns := []string{
-		// Resolution markers
-		`\b\d{3,4}[pi]\b`,  // 1080p, 720p, 2160p, 480i, 576i
-		`\b(4K|UHD)\b`,     // 4K, UHD
-
-		// HDR formats (before generic HDR to catch specific variants)
-		`\b(HDR10\+?|HDR10Plus|Dolby\s?Vision|DoVi|DV|HDR|HLG|PQ|SDR)\b`,
-
-		// Audio formats with channels (most specific first)
-		// NOTE: "DTS-HD.MA" becomes "DTS-HD MA" after dot replacement
-		// NOTE: "AAC.2.0" becomes "AAC 2 0" after dot replacement
-		`\b(DTS-HD\s?MA|DTS-HD\s?HRA|DTS-HD|DTS-X|DTS-ES)\b`,  // DTS variants
-		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                  // Audio with channels (DD5 1, DDP5 1, AAC2 0, DD 5 1)
-		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                        // Audio without channels
-		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,            // Other audio codecs
-
-		// Audio channels (after audio codecs, catches orphaned channels)
-		`\b\d\s\d\b`,        // 7 1, 5 1, 2 0 (after dot replacement)
-		`\b(Stereo|Mono)\b`,
-
-		// Source types
-		`\b(BluRay|Blu-ray|BDRip|BRRip|REMUX|WEB-DL|WEBDL|WEBRip|WEB)\b`,
-		`\b(HDTV|PDTV|SDTV|DVDRip|DVD|DVDSCR)\b`,
-		`\b(CAM|HDTS|TS|TC|SCR|R5)\b`,
-
-		// Streaming platforms
-		`\b(AMZN|NF|DSNP|HMAX|HULU|ATVP|PCOK|PMTP)\b`,
-
-		// Video codecs (H.264 becomes "H 264" after dot replacement)
-		`\bH\s26[456]\b`,  // H 264, H 265, H 266
-		`\b(x264|x265|x266|HEVC|AVC|AV1)\b`,
-		`\b(XviD|DivX|MPEG2|VC-1|VP9)\b`,
-
-		// Special editions
-		`\b(IMAX\s?Enhanced|IMAX|Remastered|REMASTERED)\b`,
-		`\b(Directors\s?Cut|DC|Theatrical|UNCUT|Criterion)\b`,
-
-		// Multi-language
-		`\b(MULTI|DUAL|DL|DUBBED|SUBBED)\b`,
-
-		// Release tags
-		`\b(PROPER|REPACK|iNTERNAL|INTERNAL|LiMiTED|LIMITED|UNRATED|EXTENDED)\b`,
-
-		// Version tags
-		`\bv\d+\b`,  // v2, v3, v4
-
-		// Release group suffix (with hyphen and period separators)
-		`\s?-\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,  // Matches "- YTS MX" or "-GROUP" at end
-
-		// Bracketed content
-		`\[.*?\]`,
-	}
-
-	for _, pattern := range patterns {
-		re := regexp.MustCompile(`(?i)` + pattern) // Case insensitive
+	// Apply all pre-compiled release group patterns
+	for _, re := range releasePatterns {
 		name = re.ReplaceAllString(name, " ")
 	}
 
-	// Collapse spaces
-	re := regexp.MustCompile(`\s+`)
-	name = re.ReplaceAllString(name, " ")
+	// Collapse spaces using pre-compiled regex
+	name = collapseSpacesRegex.ReplaceAllString(name, " ")
 
 	return strings.TrimSpace(name)
 }
@@ -288,12 +321,12 @@ func CleanMovieName(name string) string {
 	name = removeYear(name)
 
 	// Collapse multiple spaces and trim
-	re := regexp.MustCompile(`\s+`)
-	name = re.ReplaceAllString(name, " ")
+	name = collapseSpacesRegex.ReplaceAllString(name, " ")
 	name = strings.TrimSpace(name)
 
-	// Title case
-	name = strings.Title(name)
+	// Title case (using cases.Title instead of deprecated strings.Title)
+	caser := cases.Title(language.English)
+	name = caser.String(name)
 
 	// Add year if found
 	if year != "" {
@@ -305,10 +338,10 @@ func CleanMovieName(name string) string {
 
 // ExtractEpisodeInfo extracts S##E## from filename
 // Returns season, episode, and whether pattern was found
+// Uses pre-compiled regexes for performance
 func ExtractEpisodeInfo(filename string) (season int, episode int, found bool) {
 	// Try S##E## pattern
-	re := regexp.MustCompile(`[Ss](\d{1,2})[Ee](\d{1,2})`)
-	matches := re.FindStringSubmatch(filename)
+	matches := episodeSERegex.FindStringSubmatch(filename)
 
 	if len(matches) > 2 {
 		// Parse season and episode
@@ -321,8 +354,7 @@ func ExtractEpisodeInfo(filename string) (season int, episode int, found bool) {
 	}
 
 	// Try #x## pattern (e.g., 1x01)
-	re = regexp.MustCompile(`(\d{1,2})x(\d{1,2})`)
-	matches = re.FindStringSubmatch(filename)
+	matches = episodeXRegex.FindStringSubmatch(filename)
 
 	if len(matches) > 2 {
 		var s, e int

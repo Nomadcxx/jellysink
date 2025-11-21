@@ -10,6 +10,12 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
 
+const (
+	// DefaultMaxSizeGB is the default maximum total size to delete in one operation (in GB)
+	// Set to 3TB to accommodate users with large media libraries
+	DefaultMaxSizeGB = 3000
+)
+
 // CleanResult represents the result of a cleaning operation
 type CleanResult struct {
 	DuplicatesDeleted    int
@@ -42,10 +48,17 @@ func DefaultConfig() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
 		DryRun:    false,
-		MaxSizeGB: 100, // 100GB limit
+		MaxSizeGB: DefaultMaxSizeGB,
 		ProtectedPaths: []string{
+			// System directories
 			"/usr", "/etc", "/bin", "/sbin", "/boot",
 			"/sys", "/proc", "/dev", "/run",
+			"/lib", "/lib32", "/lib64", "/libx32",
+			"/var", "/opt", "/srv",
+			// Root and system user homes
+			"/root",
+			// Windows system paths (for cross-platform safety)
+			"C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
 		},
 		LogPath: filepath.Join(home, ".local/share/jellysink/operations.log"),
 	}
@@ -184,8 +197,34 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 	return result, nil
 }
 
+// validatePath sanitizes and validates a file path for safety
+func validatePath(path string) error {
+	// Clean the path (removes .., redundant slashes, etc.)
+	cleaned := filepath.Clean(path)
+
+	// Check for path traversal attempts
+	if strings.Contains(cleaned, "..") {
+		return fmt.Errorf("invalid path: contains path traversal (..) sequence")
+	}
+
+	// Ensure path is absolute for safety
+	if !filepath.IsAbs(cleaned) {
+		return fmt.Errorf("invalid path: must be absolute path")
+	}
+
+	return nil
+}
+
 // performRename renames a file in place (same directory)
 func performRename(oldPath, newPath string, dryRun bool) (Operation, error) {
+	// Validate paths for security
+	if err := validatePath(oldPath); err != nil {
+		return Operation{}, fmt.Errorf("invalid source path: %w", err)
+	}
+	if err := validatePath(newPath); err != nil {
+		return Operation{}, fmt.Errorf("invalid destination path: %w", err)
+	}
+
 	op := Operation{
 		Type:        "rename",
 		Source:      oldPath,
@@ -207,6 +246,14 @@ func performRename(oldPath, newPath string, dryRun bool) (Operation, error) {
 
 // performReorganize moves file to new directory structure (creates dirs as needed)
 func performReorganize(oldPath, newPath string, dryRun bool) (Operation, error) {
+	// Validate paths for security
+	if err := validatePath(oldPath); err != nil {
+		return Operation{}, fmt.Errorf("invalid source path: %w", err)
+	}
+	if err := validatePath(newPath); err != nil {
+		return Operation{}, fmt.Errorf("invalid destination path: %w", err)
+	}
+
 	op := Operation{
 		Type:        "move",
 		Source:      oldPath,
@@ -291,8 +338,8 @@ func writeOperationLog(ops []Operation, logPath string) error {
 		return err
 	}
 
-	// Open log file (append mode)
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Open log file (append mode) with user-only permissions for security
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
