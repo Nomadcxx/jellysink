@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -192,6 +193,18 @@ func (m MenuModel) View() string {
 	content.WriteString(fmt.Sprintf("  Movie libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.Movies.Paths)))))
 	content.WriteString(fmt.Sprintf("  TV libraries: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(m.config.Libraries.TV.Paths)))))
 	content.WriteString(fmt.Sprintf("  Scan frequency: %s\n", SuccessStyle.Render(m.config.Daemon.ScanFrequency)))
+
+	// Show daemon status
+	daemonStatus := getDaemonStatusString()
+	var statusStyle lipgloss.Style
+	if daemonStatus == "Running" {
+		statusStyle = SuccessStyle
+	} else if daemonStatus == "Stopped" {
+		statusStyle = MutedStyle
+	} else {
+		statusStyle = WarningStyle
+	}
+	content.WriteString(fmt.Sprintf("  Daemon status: %s\n", statusStyle.Render(daemonStatus)))
 	content.WriteString("\n")
 
 	// Add menu list
@@ -375,11 +388,33 @@ func (m DaemonMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			selected := m.list.SelectedItem().(MenuItem)
-			if selected.title == "Back" {
+			switch selected.title {
+			case "Back":
 				return NewMenuModel(m.config), nil
+			case "Enable Daemon":
+				// Enable and start the timer
+				cmd := exec.Command("systemctl", "enable", "--now", "jellysink.timer")
+				if err := cmd.Run(); err != nil {
+					return NewMenuModel(m.config), tea.Printf("Failed to enable daemon: %v", err)
+				}
+				return NewMenuModel(m.config), tea.Printf("Daemon enabled successfully")
+			case "Disable Daemon":
+				// Disable and stop the timer
+				cmd := exec.Command("systemctl", "disable", "--now", "jellysink.timer")
+				if err := cmd.Run(); err != nil {
+					return NewMenuModel(m.config), tea.Printf("Failed to disable daemon: %v", err)
+				}
+				return NewMenuModel(m.config), tea.Printf("Daemon disabled successfully")
+			case "Daemon Status":
+				// Show detailed status
+				timerActive, serviceActive := checkDaemonStatus()
+				statusMsg := fmt.Sprintf("Timer: %s, Service: %s",
+					boolToStatus(timerActive),
+					boolToStatus(serviceActive))
+				return m, tea.Printf(statusMsg)
+			default:
+				return m, nil
 			}
-			// TODO: Implement systemctl enable/disable
-			return NewMenuModel(m.config), tea.Printf("%s (systemctl integration pending)", selected.title)
 		}
 
 	case tea.WindowSizeMsg:
@@ -416,6 +451,26 @@ func (m DaemonMenuModel) View() string {
 	var content strings.Builder
 	content.WriteString(FormatASCIIHeader())
 	content.WriteString("\n\n")
+
+	// Show current daemon status with markers
+	timerActive, serviceActive := checkDaemonStatus()
+	content.WriteString(InfoStyle.Render("Current Status:") + "\n")
+
+	// Timer status with marker
+	if timerActive {
+		content.WriteString("  " + FormatStatusOK("Timer Active") + "\n")
+	} else {
+		content.WriteString("  " + FormatStatusInfo("Timer Inactive") + "\n")
+	}
+
+	// Service status with marker
+	if serviceActive {
+		content.WriteString("  " + FormatStatusOK("Service Active") + "\n")
+	} else {
+		content.WriteString("  " + FormatStatusInfo("Service Inactive") + "\n")
+	}
+	content.WriteString("\n")
+
 	content.WriteString(m.list.View())
 	content.WriteString("\n\n")
 
@@ -544,20 +599,20 @@ func (m LibraryMenuModel) View() string {
 
 	content.WriteString(InfoStyle.Render("Movies:") + "\n")
 	if len(m.config.Libraries.Movies.Paths) == 0 {
-		content.WriteString(MutedStyle.Render("  (none configured)") + "\n")
+		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
 	} else {
 		for _, path := range m.config.Libraries.Movies.Paths {
-			content.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
+			content.WriteString("  " + FormatStatusOK(path) + "\n")
 		}
 	}
 	content.WriteString("\n")
 
 	content.WriteString(InfoStyle.Render("TV Shows:") + "\n")
 	if len(m.config.Libraries.TV.Paths) == 0 {
-		content.WriteString(MutedStyle.Render("  (none configured)") + "\n")
+		content.WriteString("  " + FormatStatusInfo("No paths configured") + "\n")
 	} else {
 		for _, path := range m.config.Libraries.TV.Paths {
-			content.WriteString(fmt.Sprintf("  %s %s\n", SuccessStyle.Render("•"), ContentStyle.Render(path)))
+			content.WriteString("  " + FormatStatusOK(path) + "\n")
 		}
 	}
 	content.WriteString("\n\n")
@@ -935,4 +990,42 @@ func (m RemovePathModel) View() string {
 		Width(m.width - 4)
 
 	return mainStyle.Render(content.String())
+}
+
+// checkDaemonStatus checks if jellysink timer/service is active
+func checkDaemonStatus() (timerActive bool, serviceActive bool) {
+	// Check if timer is active
+	cmd := exec.Command("systemctl", "is-active", "jellysink.timer")
+	output, err := cmd.CombinedOutput()
+	timerActive = err == nil && strings.TrimSpace(string(output)) == "active"
+
+	// Check if service is active
+	cmd = exec.Command("systemctl", "is-active", "jellysink.service")
+	output, err = cmd.CombinedOutput()
+	serviceActive = err == nil && strings.TrimSpace(string(output)) == "active"
+
+	return timerActive, serviceActive
+}
+
+// getDaemonStatusString returns a formatted status string for display
+func getDaemonStatusString() string {
+	timerActive, serviceActive := checkDaemonStatus()
+
+	if timerActive && serviceActive {
+		return "Running"
+	} else if timerActive {
+		return "Timer Active"
+	} else if serviceActive {
+		return "Service Active"
+	} else {
+		return "Stopped"
+	}
+}
+
+// boolToStatus converts boolean status to readable string
+func boolToStatus(active bool) string {
+	if active {
+		return "Active"
+	}
+	return "Inactive"
 }
