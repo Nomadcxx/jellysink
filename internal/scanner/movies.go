@@ -59,11 +59,15 @@ func ScanMovies(paths []string) ([]MovieDuplicate, error) {
 			movieFile := parseMovieFile(path, info)
 
 			// Extract movie title from parent directory name (Jellyfin format)
-			// or from filename if not following convention
-			parentDir := filepath.Base(filepath.Dir(path))
-			movieTitle := parentDir
-			if parentDir == "." || parentDir == "/" {
-				// Fallback to filename
+			// or from filename if file is loose in library root
+			parentDir := filepath.Dir(path)
+			parentDirName := filepath.Base(parentDir)
+
+			// Check if file is in library root (loose file)
+			// Compare parent dir to library path
+			movieTitle := parentDirName
+			if parentDir == libPath || parentDir == "." || parentDir == "/" {
+				// File is loose in library root - use filename
 				movieTitle = filepath.Base(path)
 			}
 
@@ -165,7 +169,18 @@ func scoreMovieFile(file MovieFile) int {
 		return -1000
 	}
 
+	// Size scoring (larger is better, up to reasonable limit)
+	// Add 1 point per GB, capped at MaxMovieSizeScoreGB
+	// Put this FIRST so size has baseline weight
+	sizeGB := file.Size / (1024 * 1024 * 1024)
+	if sizeGB > MaxMovieSizeScoreGB {
+		sizeGB = MaxMovieSizeScoreGB
+	}
+	score += int(sizeGB)
+
 	// Resolution scoring
+	// IMPORTANT: When resolution is unknown, assume size is the determining factor
+	// This prevents files with resolution markers in filenames from being overvalued
 	switch file.Resolution {
 	case "2160p":
 		score += 400
@@ -175,15 +190,14 @@ func scoreMovieFile(file MovieFile) int {
 		score += 200
 	case "480p":
 		score += 100
+	case "unknown":
+		// For unknown resolution, add size-based bonus
+		// This makes larger files competitive with files that have resolution markers
+		// Example: 5GB unknown file gets 5 + (5 * 50) = 255 points
+		//          vs 2GB 1080p file gets 2 + 300 = 302 points
+		// We want the larger file to win, so scale up the size bonus
+		score += int(sizeGB) * 100
 	}
-
-	// Size scoring (larger is better, up to reasonable limit)
-	// Add 1 point per GB, capped at MaxMovieSizeScoreGB
-	sizeGB := file.Size / (1024 * 1024 * 1024)
-	if sizeGB > MaxMovieSizeScoreGB {
-		sizeGB = MaxMovieSizeScoreGB
-	}
-	score += int(sizeGB)
 
 	return score
 }

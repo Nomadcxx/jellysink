@@ -19,19 +19,19 @@ const (
 
 // CleanResult represents the result of a cleaning operation
 type CleanResult struct {
-	DuplicatesDeleted    int
-	ComplianceFixed      int
-	SpaceFreed           int64
-	Errors               []error
-	Operations           []Operation // For rollback capability
-	DryRun               bool
+	DuplicatesDeleted int
+	ComplianceFixed   int
+	SpaceFreed        int64
+	Errors            []error
+	Operations        []Operation // For rollback capability
+	DryRun            bool
 }
 
 // Operation represents a single filesystem operation
 type Operation struct {
-	Type        string    // "delete", "rename", "move"
-	Source      string    // Original path
-	Destination string    // New path (for rename/move)
+	Type        string // "delete", "rename", "move"
+	Source      string // Original path
+	Destination string // New path (for rename/move)
 	Timestamp   time.Time
 	Completed   bool
 }
@@ -39,7 +39,7 @@ type Operation struct {
 // Config holds cleaner configuration
 type Config struct {
 	DryRun         bool
-	MaxSizeGB      int64  // Maximum total size to delete in one operation
+	MaxSizeGB      int64 // Maximum total size to delete in one operation
 	ProtectedPaths []string
 	LogPath        string // Path to operation log for rollback
 }
@@ -155,8 +155,15 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 		}
 	}
 
-	// Process compliance fixes (rename/reorganize)
-	for _, issue := range compliance {
+	// Process compliance fixes using scanner's Apply functions
+	for i, issue := range compliance {
+		// Skip manual review items (collisions, sample files, etc.)
+		if issue.SuggestedAction == "manual_review" {
+			result.Errors = append(result.Errors,
+				fmt.Errorf("skipped (needs manual review): %s - %s", issue.Path, issue.Problem))
+			continue
+		}
+
 		if isProtectedPath(issue.Path, config.ProtectedPaths) {
 			result.Errors = append(result.Errors,
 				fmt.Errorf("refusing to modify protected path: %s", issue.Path))
@@ -166,25 +173,44 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 		var op Operation
 		var err error
 
-		switch issue.SuggestedAction {
-		case "rename":
-			op, err = performRename(issue.Path, issue.SuggestedPath, config.DryRun)
-		case "reorganize":
-			op, err = performReorganize(issue.Path, issue.SuggestedPath, config.DryRun)
-		default:
-			err = fmt.Errorf("unknown action: %s", issue.SuggestedAction)
+		// Use scanner's Apply functions which handle folder detection
+		if !config.DryRun {
+			// Progress indicator
+			if len(compliance) > 5 && i%5 == 0 {
+				fmt.Printf("Fixing compliance issues: %d/%d\n", i, len(compliance))
+			}
+
+			if issue.Type == "movie" {
+				err = scanner.ApplyMovieCompliance(issue)
+			} else if issue.Type == "tv" {
+				err = scanner.ApplyTVCompliance(issue)
+			} else {
+				err = fmt.Errorf("unknown issue type: %s", issue.Type)
+			}
+		}
+
+		// Build operation record
+		op = Operation{
+			Type:        issue.SuggestedAction,
+			Source:      issue.Path,
+			Destination: issue.SuggestedPath,
+			Timestamp:   time.Now(),
 		}
 
 		if err != nil {
 			result.Errors = append(result.Errors, err)
 			op.Completed = false
 		} else {
-			if op.Completed {
-				result.ComplianceFixed++
-			}
+			op.Completed = true
+			result.ComplianceFixed++
 		}
 
 		result.Operations = append(result.Operations, op)
+	}
+
+	// Final progress message
+	if !config.DryRun && len(compliance) > 0 {
+		fmt.Printf("Fixed %d compliance issues\n", result.ComplianceFixed)
 	}
 
 	// Write operation log (for potential rollback)

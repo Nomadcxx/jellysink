@@ -19,8 +19,18 @@ type ComplianceIssue struct {
 
 // ScanMovieCompliance scans for non-Jellyfin-compliant movie folders
 // Expected format: Movie Name (Year)/Movie Name (Year).ext
-func ScanMovieCompliance(paths []string) ([]ComplianceIssue, error) {
+// excludePaths: list of file paths to skip (e.g., files marked for deletion in duplicate scan)
+func ScanMovieCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue, error) {
 	var issues []ComplianceIssue
+	targetPaths := make(map[string]string) // suggestedPath -> originalPath
+
+	// Build exclusion set for fast lookup
+	excludeSet := make(map[string]bool)
+	if len(excludePaths) > 0 {
+		for _, path := range excludePaths[0:] {
+			excludeSet[path] = true
+		}
+	}
 
 	for _, libPath := range paths {
 		if _, err := os.Stat(libPath); err != nil {
@@ -42,9 +52,29 @@ func ScanMovieCompliance(paths []string) ([]ComplianceIssue, error) {
 				return nil
 			}
 
+			// Skip files marked for deletion in duplicate scan
+			if excludeSet[path] {
+				return nil
+			}
+
+			// Skip sample files - they should be deleted, not renamed
+			if isSampleFile(path) {
+				return nil
+			}
+
 			// Check if this is compliant
 			issue := checkMovieCompliance(path, libPath)
 			if issue != nil {
+				// Check for collision: another file already wants this target path
+				if existingSource, exists := targetPaths[issue.SuggestedPath]; exists {
+					// Collision detected! Skip this one and add warning to existing issue
+					issue.Problem = fmt.Sprintf("COLLISION: Multiple files want same target (also: %s)", filepath.Base(existingSource))
+					issue.SuggestedAction = "manual_review"
+				} else {
+					// No collision, track this target
+					targetPaths[issue.SuggestedPath] = path
+				}
+
 				issues = append(issues, *issue)
 			}
 
@@ -103,15 +133,20 @@ func checkMovieCompliance(filePath, libRoot string) *ComplianceIssue {
 	if parentDir != filenameNoExt {
 		// Check if both follow pattern but just don't match
 		if hasYear(parentDir) && hasYear(filenameNoExt) {
-			// Both have years, should match
-			suggestedPath := filepath.Join(filepath.Dir(filePath), parentDir+filepath.Ext(filePath))
+			// Both have years but don't match - clean the filename to get the correct name
+			// This handles cases where folder has release group remnants like "Moon RightSiZE (2009)"
+			cleanName := CleanMovieName(filenameNoExt)
+
+			// Use the cleaned filename as the source of truth
+			suggestedDir := filepath.Join(filepath.Dir(filepath.Dir(filePath)), cleanName)
+			suggestedPath := filepath.Join(suggestedDir, cleanName+filepath.Ext(filePath))
 
 			return &ComplianceIssue{
 				Path:            filePath,
 				Type:            "movie",
 				Problem:         "Folder name doesn't match filename",
 				SuggestedPath:   suggestedPath,
-				SuggestedAction: "rename",
+				SuggestedAction: "reorganize",
 			}
 		}
 	}
@@ -140,8 +175,17 @@ func checkMovieCompliance(filePath, libRoot string) *ComplianceIssue {
 
 // ScanTVCompliance scans for non-Jellyfin-compliant TV show folders
 // Expected format: Show Name (Year)/Season ##/Show Name (Year) S##E##.ext
-func ScanTVCompliance(paths []string) ([]ComplianceIssue, error) {
+// excludePaths: list of file paths to skip (e.g., files marked for deletion in duplicate scan)
+func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue, error) {
 	var issues []ComplianceIssue
+
+	// Build exclusion set for fast lookup
+	excludeSet := make(map[string]bool)
+	if len(excludePaths) > 0 {
+		for _, path := range excludePaths[0:] {
+			excludeSet[path] = true
+		}
+	}
 
 	for _, libPath := range paths {
 		if _, err := os.Stat(libPath); err != nil {
@@ -160,6 +204,16 @@ func ScanTVCompliance(paths []string) ([]ComplianceIssue, error) {
 
 			// Only check video files
 			if info.IsDir() || !isVideoFile(path) {
+				return nil
+			}
+
+			// Skip files marked for deletion in duplicate scan
+			if excludeSet[path] {
+				return nil
+			}
+
+			// Skip sample files - they should be deleted, not renamed
+			if isSampleFile(path) {
 				return nil
 			}
 
@@ -231,6 +285,33 @@ func checkTVCompliance(filePath, libRoot string, season, episode int) *Complianc
 	return nil
 }
 
+// isSampleFile checks if a file is a sample/trailer/extra (should be deleted, not fixed)
+func isSampleFile(path string) bool {
+	filename := strings.ToLower(filepath.Base(path))
+	// Remove dots and other separators for matching
+	normalized := strings.ReplaceAll(filename, ".", " ")
+	normalized = strings.ReplaceAll(normalized, "_", " ")
+
+	sampleMarkers := []string{
+		"sample",
+		"trailer",
+		"extra",
+		"deleted scene",
+		"behind the scenes",
+		"making of",
+		"interview",
+		"featurette",
+	}
+
+	for _, marker := range sampleMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // isReleaseGroupFolder checks if a folder name contains release group markers
 func isReleaseGroupFolder(name string) bool {
 	nameUpper := strings.ToUpper(name)
@@ -272,4 +353,98 @@ func hasYear(s string) bool {
 func hasYearInParentheses(s string) bool {
 	re := regexp.MustCompile(`\(\d{4}\)`)
 	return re.MatchString(s)
+}
+
+// ApplyMovieCompliance applies the suggested fix for a compliance issue
+// Creates folder if needed, renames/moves file to compliant location
+func ApplyMovieCompliance(issue ComplianceIssue) error {
+	if issue.Type != "movie" {
+		return fmt.Errorf("not a movie compliance issue")
+	}
+
+	// Create parent directory if it doesn't exist
+	targetDir := filepath.Dir(issue.SuggestedPath)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", targetDir, err)
+	}
+
+	// Check if target already exists
+	if _, err := os.Stat(issue.SuggestedPath); err == nil {
+		return fmt.Errorf("target file already exists: %s", issue.SuggestedPath)
+	}
+
+	// Move/rename file
+	if err := os.Rename(issue.Path, issue.SuggestedPath); err != nil {
+		return fmt.Errorf("failed to move file: %w", err)
+	}
+
+	// If original directory is now empty (and not library root), remove it
+	originalDir := filepath.Dir(issue.Path)
+	if entries, err := os.ReadDir(originalDir); err == nil && len(entries) == 0 {
+		// Safe to remove empty directory
+		_ = os.Remove(originalDir)
+	}
+
+	return nil
+}
+
+// ApplyTVCompliance applies the suggested fix for a TV show compliance issue
+// Checks if Show Name (Year) and Season ## folders exist before creating
+func ApplyTVCompliance(issue ComplianceIssue) error {
+	if issue.Type != "tv" {
+		return fmt.Errorf("not a TV compliance issue")
+	}
+
+	// Parse target path components
+	targetSeasonDir := filepath.Dir(issue.SuggestedPath)
+	targetShowDir := filepath.Dir(targetSeasonDir)
+
+	// Check if Show Name (Year) folder already exists
+	showDirExists := false
+	if info, err := os.Stat(targetShowDir); err == nil && info.IsDir() {
+		showDirExists = true
+	}
+
+	// Check if Season ## folder already exists
+	seasonDirExists := false
+	if info, err := os.Stat(targetSeasonDir); err == nil && info.IsDir() {
+		seasonDirExists = true
+	}
+
+	// Create missing directories
+	if !showDirExists {
+		if err := os.Mkdir(targetShowDir, 0755); err != nil {
+			return fmt.Errorf("failed to create show directory %s: %w", targetShowDir, err)
+		}
+	}
+
+	if !seasonDirExists {
+		if err := os.Mkdir(targetSeasonDir, 0755); err != nil {
+			return fmt.Errorf("failed to create season directory %s: %w", targetSeasonDir, err)
+		}
+	}
+
+	// Check if target file already exists
+	if _, err := os.Stat(issue.SuggestedPath); err == nil {
+		return fmt.Errorf("target file already exists: %s", issue.SuggestedPath)
+	}
+
+	// Move/rename file to compliant location
+	if err := os.Rename(issue.Path, issue.SuggestedPath); err != nil {
+		return fmt.Errorf("failed to move file: %w", err)
+	}
+
+	// If original directory is now empty, remove it
+	originalDir := filepath.Dir(issue.Path)
+	if entries, err := os.ReadDir(originalDir); err == nil && len(entries) == 0 {
+		_ = os.Remove(originalDir)
+
+		// If original parent directory is also now empty, remove it too
+		originalParentDir := filepath.Dir(originalDir)
+		if entries, err := os.ReadDir(originalParentDir); err == nil && len(entries) == 0 {
+			_ = os.Remove(originalParentDir)
+		}
+	}
+
+	return nil
 }

@@ -2,10 +2,12 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/Nomadcxx/jellysink/internal/config"
 	"github.com/Nomadcxx/jellysink/internal/daemon"
+	"github.com/Nomadcxx/jellysink/internal/reporter"
 )
 
 // MenuItem represents a menu option
@@ -83,6 +86,9 @@ type scanStatusMsg struct {
 	err        error
 }
 
+// progressTickMsg is sent periodically to update progress animation
+type progressTickMsg struct{}
+
 // Init initializes the menu
 func (m MenuModel) Init() tea.Cmd {
 	return nil
@@ -132,8 +138,17 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Show error and return to menu
 			return m, tea.Printf("Scan failed: %v", msg.err)
 		}
-		// Load report and switch to report view
-		return m, tea.Printf("Scan complete! Report: %s", msg.reportPath)
+		// Load report JSON and switch to report view
+		report, err := loadReportJSON(msg.reportPath)
+		if err != nil {
+			return m, tea.Printf("Failed to load report: %v", err)
+		}
+
+		// Create report view model and transfer dimensions
+		reportModel := NewModel(report)
+		return reportModel, func() tea.Msg {
+			return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+		}
 	}
 
 	var cmd tea.Cmd
@@ -145,7 +160,10 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 	switch title {
 	case "Run Manual Scan":
-		return m, m.runScan
+		scanningModel := NewScanningModel(m.config)
+		scanningModel.width = m.width
+		scanningModel.height = m.height
+		return scanningModel, scanningModel.Init()
 
 	case "View Last Report":
 		return m, m.viewLastReport
@@ -182,17 +200,25 @@ func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// runScan executes a manual scan
-func (m MenuModel) runScan() tea.Msg {
-	d := daemon.New(m.config)
-	reportPath, err := d.RunScan(m.ctx)
-	return scanStatusMsg{reportPath: reportPath, err: err}
-}
-
 // viewLastReport finds and displays the most recent report
 func (m MenuModel) viewLastReport() tea.Msg {
 	// TODO: Implement finding last report
 	return nil
+}
+
+// loadReportJSON loads a report from a JSON file
+func loadReportJSON(path string) (reporter.Report, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return reporter.Report{}, fmt.Errorf("failed to read report: %w", err)
+	}
+
+	var report reporter.Report
+	if err := json.Unmarshal(data, &report); err != nil {
+		return reporter.Report{}, fmt.Errorf("failed to parse report: %w", err)
+	}
+
+	return report, nil
 }
 
 // View renders the menu
@@ -483,7 +509,7 @@ func (m DaemonMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				statusMsg := fmt.Sprintf("Timer: %s, Service: %s",
 					boolToStatus(timerActive),
 					boolToStatus(serviceActive))
-				return m, tea.Printf(statusMsg)
+				return m, tea.Printf("%s", statusMsg)
 			default:
 				return m, nil
 			}
@@ -597,6 +623,8 @@ func NewLibraryMenuModel(cfg *config.Config) LibraryMenuModel {
 	l := list.New(items, delegate, 0, 0)
 	l.Title = "LIBRARY CONFIGURATION"
 	l.Styles.Title = TitleStyle
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
 
 	return LibraryMenuModel{
 		list:   l,
@@ -613,13 +641,29 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
-			return NewMenuModel(m.config), nil
+			mainMenu := NewMenuModel(m.config)
+			mainMenu.width = m.width
+			mainMenu.height = m.height
+			listHeight := m.height - 16
+			if listHeight < 8 {
+				listHeight = 8
+			}
+			mainMenu.list.SetSize(m.width-4, listHeight)
+			return mainMenu, nil
 
 		case "enter":
 			selected := m.list.SelectedItem().(MenuItem)
 			switch selected.title {
 			case "Back":
-				return NewMenuModel(m.config), nil
+				mainMenu := NewMenuModel(m.config)
+				mainMenu.width = m.width
+				mainMenu.height = m.height
+				listHeight := m.height - 16
+				if listHeight < 8 {
+					listHeight = 8
+				}
+				mainMenu.list.SetSize(m.width-4, listHeight)
+				return mainMenu, nil
 			case "Add Movie Library":
 				addModel := NewAddPathModel(m.config, "movie")
 				addModel.width = m.width
@@ -645,10 +689,25 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				listModel := NewListLibrariesModel(m.config)
 				listModel.width = m.width
 				listModel.height = m.height
+				// Initialize viewport immediately with dimensions
+				headerHeight := 15
+				footerHeight := 4
+				listModel.viewport = viewport.New(m.width-4, m.height-headerHeight-footerHeight)
+				listModel.viewport.Style = lipgloss.NewStyle().Padding(0, 1)
+				listModel.viewport.SetContent(listModel.buildLibraryList())
+				listModel.ready = true
 				return listModel, nil
 			default:
-				return m, nil
+				// Let list handle other keys
+				var cmd tea.Cmd
+				m.list, cmd = m.list.Update(msg)
+				return m, cmd
 			}
+		default:
+			// Let list handle all other keys
+			var cmd tea.Cmd
+			m.list, cmd = m.list.Update(msg)
+			return m, cmd
 		}
 
 	case tea.WindowSizeMsg:
@@ -660,11 +719,10 @@ func (m LibraryMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			listHeight = 8
 		}
 		m.list.SetSize(msg.Width-4, listHeight)
+		return m, nil
 	}
 
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
+	return m, nil
 }
 
 func (m LibraryMenuModel) View() string {
@@ -831,16 +889,11 @@ func (m AddPathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 
-			// Show success and return to library menu
-			libModel := NewLibraryMenuModel(m.config)
-			libModel.width = m.width
-			libModel.height = m.height
-			listHeight := m.height - 16
-			if listHeight < 8 {
-				listHeight = 8
-			}
-			libModel.list.SetSize(m.width-4, listHeight)
-			return libModel, tea.Printf("Added %s library path: %s", m.libraryType, path)
+			// Show success and clear input for next path
+			m.success = fmt.Sprintf("Added: %s", path)
+			m.err = ""
+			m.textInput.SetValue("")
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -886,6 +939,25 @@ func (m AddPathModel) View() string {
 		title = "ADD TV LIBRARY PATH"
 	}
 	content.WriteString(TitleStyle.Render(title) + "\n\n")
+
+	// Show currently configured paths
+	var currentPaths []string
+	if m.libraryType == "movie" {
+		currentPaths = m.config.Libraries.Movies.Paths
+		content.WriteString(InfoStyle.Render("Currently configured Movie libraries:") + "\n")
+	} else {
+		currentPaths = m.config.Libraries.TV.Paths
+		content.WriteString(InfoStyle.Render("Currently configured TV libraries:") + "\n")
+	}
+
+	if len(currentPaths) == 0 {
+		content.WriteString("  " + MutedStyle.Render("None") + "\n")
+	} else {
+		for i, p := range currentPaths {
+			content.WriteString(fmt.Sprintf("  %d. %s\n", i+1, MutedStyle.Render(p)))
+		}
+	}
+	content.WriteString("\n")
 
 	// Instructions
 	content.WriteString(InfoStyle.Render("Enter the full path to your library folder:") + "\n\n")
@@ -1164,7 +1236,16 @@ func (m ListLibrariesModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q", "esc":
-			return NewLibraryMenuModel(m.config), nil
+			// Transfer dimensions when returning to menu
+			libModel := NewLibraryMenuModel(m.config)
+			libModel.width = m.width
+			libModel.height = m.height
+			listHeight := m.height - 16
+			if listHeight < 8 {
+				listHeight = 8
+			}
+			libModel.list.SetSize(m.width-4, listHeight)
+			return libModel, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -1269,6 +1350,156 @@ func (m ListLibrariesModel) View() string {
 	content.WriteString(footer)
 
 	// Wrap in padding
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// ScanningModel shows a loading screen while scan is running
+type ScanningModel struct {
+	config       *config.Config
+	width        int
+	height       int
+	ctx          context.Context
+	cancel       context.CancelFunc
+	progress     float64 // 0.0 to 1.0
+	currentPhase string
+}
+
+// NewScanningModel creates a new scanning screen
+func NewScanningModel(cfg *config.Config) ScanningModel {
+	ctx, cancel := context.WithCancel(context.Background())
+	return ScanningModel{
+		config: cfg,
+		ctx:    ctx,
+		cancel: cancel,
+	}
+}
+
+// Init starts the scan
+func (m ScanningModel) Init() tea.Cmd {
+	return tea.Batch(m.runScan, m.tickProgress)
+}
+
+// tickProgress updates progress periodically
+func (m ScanningModel) tickProgress() tea.Msg {
+	time.Sleep(200 * time.Millisecond)
+	return progressTickMsg{}
+}
+
+// runScan executes the scan in background
+func (m ScanningModel) runScan() tea.Msg {
+	d := daemon.New(m.config)
+	reportPath, err := d.RunScan(m.ctx)
+	return scanStatusMsg{reportPath: reportPath, err: err}
+}
+
+// Update handles messages
+func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c":
+			m.cancel()
+			return m, tea.Quit
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		return m, nil
+
+	case progressTickMsg:
+		// Update progress (simulate with incremental progress)
+		if m.progress < 0.95 {
+			m.progress += 0.02 // Increment by 2%
+			if m.progress < 0.25 {
+				m.currentPhase = "Scanning movie libraries..."
+			} else if m.progress < 0.5 {
+				m.currentPhase = "Scanning TV show libraries..."
+			} else if m.progress < 0.7 {
+				m.currentPhase = "Checking naming compliance..."
+			} else if m.progress < 0.9 {
+				m.currentPhase = "Analyzing duplicates..."
+			} else {
+				m.currentPhase = "Generating report..."
+			}
+		}
+		return m, m.tickProgress
+
+	case scanStatusMsg:
+		// Scan completed - switch to report view
+		if msg.err != nil {
+			return m, tea.Printf("Scan failed: %v", msg.err)
+		}
+
+		// Load report and switch to report view
+		report, err := loadReportJSON(msg.reportPath)
+		if err != nil {
+			return m, tea.Printf("Failed to load report: %v", err)
+		}
+
+		// Create report model with dimensions
+		reportModel := NewModel(report)
+		return reportModel, func() tea.Msg {
+			return tea.WindowSizeMsg{Width: m.width, Height: m.height}
+		}
+	}
+
+	return m, nil
+}
+
+// View renders the scanning screen
+func (m ScanningModel) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Initializing..."
+	}
+
+	var content strings.Builder
+
+	// Show ASCII header
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	// Progress header
+	progressHeaderStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(RAMARed).
+		Align(lipgloss.Center).
+		Width(m.width - 8)
+	content.WriteString(progressHeaderStyle.Render("SCANNING LIBRARIES"))
+	content.WriteString("\n\n")
+
+	// Current phase
+	if m.currentPhase != "" {
+		phaseStyle := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(ColorInfo).
+			Align(lipgloss.Center).
+			Width(m.width - 8)
+		content.WriteString(phaseStyle.Render(m.currentPhase))
+		content.WriteString("\n\n")
+	}
+
+	// Progress bar (50 characters wide)
+	progress := int(m.progress * 50)
+	if progress > 50 {
+		progress = 50
+	}
+	progressBar := strings.Repeat("█", progress) + strings.Repeat("░", 50-progress)
+	progressBarStyle := lipgloss.NewStyle().
+		Foreground(RAMARed).
+		Align(lipgloss.Center).
+		Width(m.width - 8)
+	content.WriteString(progressBarStyle.Render(fmt.Sprintf("[%s] %.1f%%", progressBar, m.progress*100)))
+	content.WriteString("\n\n")
+
+	// Help text
+	content.WriteString(MutedStyle.Render("Press Ctrl+C to cancel") + "\n")
+
+	// Wrap in centered style
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
 		Width(m.width - 4)

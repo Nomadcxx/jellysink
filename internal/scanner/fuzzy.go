@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -11,36 +12,38 @@ import (
 
 // Pre-compiled regexes for performance optimization
 var (
-	releasePatterns       []*regexp.Regexp
-	collapseSpacesRegex   *regexp.Regexp
-	removePunctRegex      *regexp.Regexp
-	yearParenRegex        *regexp.Regexp
-	yearBracketRegex      *regexp.Regexp
-	yearDotRegex          *regexp.Regexp
-	yearSpaceRegex        *regexp.Regexp
-	yearRemoveRegexes     []*regexp.Regexp
-	episodeSERegex        *regexp.Regexp
-	episodeXRegex         *regexp.Regexp
+	releasePatterns     []*regexp.Regexp
+	collapseSpacesRegex *regexp.Regexp
+	removePunctRegex    *regexp.Regexp
+	yearParenRegex      *regexp.Regexp
+	yearBracketRegex    *regexp.Regexp
+	yearDotRegex        *regexp.Regexp
+	yearSpaceRegex      *regexp.Regexp
+	yearRemoveRegexes   []*regexp.Regexp
+	episodeSERegex      *regexp.Regexp
+	episodeXRegex       *regexp.Regexp
 )
 
 func init() {
 	// Pre-compile all release group patterns
 	patterns := []string{
 		// Resolution markers
-		`\b\d{3,4}[pi]\b`,  // 1080p, 720p, 2160p, 480i, 576i
-		`\b(4K|UHD)\b`,     // 4K, UHD
+		`\b\d{3,4}[pi]\b`, // 1080p, 720p, 2160p, 480i, 576i
+		`\b(4K|UHD)\b`,    // 4K, UHD
 
 		// HDR formats (before generic HDR to catch specific variants)
 		`\b(HDR10\+?|HDR10Plus|Dolby\s?Vision|DoVi|DV|HDR|HLG|PQ|SDR)\b`,
 
 		// Audio formats with channels (most specific first)
-		`\b(DTS-HD\s?MA|DTS-HD\s?HRA|DTS-HD|DTS-X|DTS-ES)\b`,  // DTS variants
-		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                  // Audio with channels
-		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                        // Audio without channels
-		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,            // Other audio codecs
+		`\b(DTS-HD\s?MA|DTS-HD\s?HRA|DTS-HD|DTS-X|DTS-ES)\b`, // DTS variants
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                // Audio with channels
+		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                      // Audio without channels
+		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,           // Other audio codecs
+		`\d+Audio`,   // Orphaned audio markers like "3Audio"
+		`MA\d+\s\d+`, // Orphaned MA markers like "MA5 1"
 
 		// Audio channels (after audio codecs)
-		`\b\d\s\d\b`,        // 7 1, 5 1, 2 0
+		`\b\d\s\d\b`, // 7 1, 5 1, 2 0
 		`\b(Stereo|Mono)\b`,
 
 		// Source types
@@ -51,29 +54,35 @@ func init() {
 		// Streaming platforms
 		`\b(AMZN|NF|DSNP|HMAX|HULU|ATVP|PCOK|PMTP)\b`,
 
-		// Video codecs
-		`\bH\s26[456]\b`,  // H 264, H 265, H 266
-		`\b(x264|x265|x266|HEVC|AVC|AV1)\b`,
+		// Video codecs (both spaced and non-spaced variants)
+		`\bH\s?26[456]\b`, // H 264, H264, H 265, H265, etc.
+		`\b(x264|x265|x266|HEVC|AVC|AV1|H264|H265|H266)\b`,
 		`\b(XviD|DivX|MPEG2|VC-1|VP9)\b`,
 
 		// Special editions
 		`\b(IMAX\s?Enhanced|IMAX|Remastered|REMASTERED)\b`,
 		`\b(Directors\s?Cut|DC|Theatrical|UNCUT|Criterion)\b`,
 
-		// Multi-language
-		`\b(MULTI|DUAL|DL|DUBBED|SUBBED)\b`,
+		// Multi-language and subtitles
+		`\b(MULTI|DUAL|DL|DUBBED|SUBBED|MSubs|Subs)\b`,
 
 		// Release tags
 		`\b(PROPER|REPACK|iNTERNAL|INTERNAL|LiMiTED|LIMITED|UNRATED|EXTENDED)\b`,
 
 		// Version tags
-		`\bv\d+\b`,  // v2, v3, v4
+		`\bv\d+\b`, // v2, v3, v4
 
-		// Release group suffix
-		`\s?-\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,
+		// Parenthesized markers (iso, rip, etc.)
+		`\((?:iso|rip|cd\d|disc\d|disk\d)\)`,
 
-		// Bracketed content
+		// Release group suffix (e.g., "-GROUP" or "~ TombDoc")
+		`\s?[-~]\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,
+
+		// Bracketed content (e.g., "[Org BD 2.0 Hindi + DD 5.1 English]")
 		`\[.*?\]`,
+
+		// Bit depth
+		`\b(8bit|10bit|12bit)\b`,
 	}
 
 	releasePatterns = make([]*regexp.Regexp, 0, len(patterns))
@@ -91,12 +100,12 @@ func init() {
 
 	// Year removal regexes (without capture groups)
 	yearRemovePatterns := []string{
-		`\(\d{4}\)`,  // (2025)
-		`\[\d{4}\]`,  // [2025]
-		`\.\d{4}\.`,  // .2025.
-		`\s\d{4}\s`,  // " 2025 "
-		`^\d{4}\s`,   // "2025 " at start
-		`\s\d{4}$`,   // " 2025" at end
+		`\(\d{4}\)`, // (2025)
+		`\[\d{4}\]`, // [2025]
+		`\.\d{4}\.`, // .2025.
+		`\s\d{4}\s`, // " 2025 "
+		`^\d{4}\s`,  // "2025 " at start
+		`\s\d{4}$`,  // " 2025" at end
 	}
 	yearRemoveRegexes = make([]*regexp.Regexp, 0, len(yearRemovePatterns))
 	for _, pattern := range yearRemovePatterns {
@@ -158,20 +167,41 @@ func NormalizeName(name string) string {
 
 // ExtractYear extracts year from various formats
 // Uses pre-compiled regexes for performance
+// When multiple years are present, returns the LAST one (e.g., "Blade Runner 2049 2017" -> "2017")
 func ExtractYear(name string) string {
-	// Try different year patterns (in order of specificity)
-	yearRegexes := []*regexp.Regexp{
-		yearParenRegex,   // (2025)
-		yearBracketRegex, // [2025]
-		yearDotRegex,     // .2025.
-		yearSpaceRegex,   // 2025 (with space)
+	// Find all 4-digit numbers that could be years (1900-2099)
+	// Use negative lookbehind/lookahead to avoid matching resolution markers
+	allDigitsRegex := regexp.MustCompile(`\b(\d{4})\b`)
+	matches := allDigitsRegex.FindAllStringSubmatch(name, -1)
+
+	// Known resolution values to skip
+	resolutions := map[string]bool{
+		"2160": true, // 4K
+		"1920": true, // 1080p width
+		"1440": true, // 2K
+		"1280": true, // 720p width
 	}
 
-	for _, re := range yearRegexes {
-		matches := re.FindStringSubmatch(name)
-		if len(matches) > 1 {
-			return matches[1]
+	var validYears []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			year := match[1]
+
+			// Skip known resolution values
+			if resolutions[year] {
+				continue
+			}
+
+			// Only consider valid year range (1900-2099)
+			if year >= "1900" && year <= "2099" {
+				validYears = append(validYears, year)
+			}
 		}
+	}
+
+	// Return the last valid year (most likely the release year, not title year)
+	if len(validYears) > 0 {
+		return validYears[len(validYears)-1]
 	}
 
 	return ""
@@ -180,9 +210,32 @@ func ExtractYear(name string) string {
 // removeYear removes year from name (helper for NormalizeName)
 // Uses pre-compiled regexes for performance
 func removeYear(name string) string {
-	// Apply all year removal patterns
+	// Apply all year removal patterns, replacing with space to prevent concatenation
 	for _, re := range yearRemoveRegexes {
-		name = re.ReplaceAllString(name, "")
+		name = re.ReplaceAllString(name, " ")
+	}
+
+	return name
+}
+
+// removeSpecificYear removes only the specified year from name (helper for CleanMovieName)
+// This preserves years in movie titles (e.g., "Blade Runner 2049" keeps 2049)
+func removeSpecificYear(name, year string) string {
+	if year == "" {
+		return name
+	}
+
+	// Try to remove year in various formats
+	patterns := []string{
+		`\(` + year + `\)`,       // (2025)
+		`\[` + year + `\]`,       // [2025]
+		`\.` + year + `\.`,       // .2025.
+		`\s` + year + `(?:\s|$)`, // " 2025 " or " 2025" at end
+	}
+
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		name = re.ReplaceAllString(name, " ")
 	}
 
 	return name
@@ -308,25 +361,112 @@ func min(a, b, c int) int {
 	return c
 }
 
+// stripOrphanedReleaseGroups removes common release group names that remain after stripping markers
+// These are typically alphanumeric strings with mixed case (e.g., "D3FiL3R", "RARBG", "YTS")
+func stripOrphanedReleaseGroups(name string) string {
+	// Common release group patterns (exact matches only, case-insensitive)
+	knownGroups := []string{
+		"RARBG", "YTS", "YIFY", "ETRG", "FGT", "MkvCage",
+		"STUTTERSHIT", "SPARKS", "ROVERS", "PHOENiX", "CMRG",
+		"EVO", "ION10", "PSA", "AFG", "SAMPA", "TGx", "SNAKE",
+		"D3FiL3R", "FiSTWORLD", "CRYS", "HANDJOB", "RightSiZE",
+		"NTb", "NTG", "GETiT", "PiGNUS", "BTN", "DON", "CtrlHD",
+	}
+
+	// Check for known groups (case-insensitive)
+	words := strings.Fields(name)
+
+	for i, word := range words {
+		wordLower := strings.ToLower(word)
+		for _, group := range knownGroups {
+			if wordLower == strings.ToLower(group) {
+				// Remove this word
+				words = append(words[:i], words[i+1:]...)
+				return strings.Join(words, " ")
+			}
+		}
+	}
+
+	// Pattern-based detection for unknown groups
+	// Match: alphanumeric with mixed case + numbers (e.g., "D3FiL3R", "x0r", "NTb")
+	// Only match if it's the last word (safeguard against matching title words)
+	if len(words) > 0 {
+		lastWord := words[len(words)-1]
+		lastWordLower := strings.ToLower(lastWord)
+
+		// Check if last word looks like a release group:
+		// - Contains mix of letters and numbers
+		// - Has unusual capitalization (not Title Case or all lowercase)
+		// - Length between 3-15 characters
+		if len(lastWord) >= 3 && len(lastWord) <= 15 {
+			hasDigit := false
+			hasLetter := false
+			hasLower := false
+			hasUpper := false
+
+			for _, ch := range lastWord {
+				if ch >= '0' && ch <= '9' {
+					hasDigit = true
+				} else if ch >= 'a' && ch <= 'z' {
+					hasLetter = true
+					hasLower = true
+				} else if ch >= 'A' && ch <= 'Z' {
+					hasLetter = true
+					hasUpper = true
+				}
+			}
+
+			// If it has both letters and numbers, or unusual mixed case, it's likely a release group
+			if hasLetter && hasDigit {
+				// Remove last word
+				return strings.Join(words[:len(words)-1], " ")
+			}
+
+			// All caps words at end are often release groups (but check length to avoid removing title words)
+			nameLower := strings.ToLower(name)
+			if hasUpper && !hasLower && len(lastWord) >= 4 && !strings.Contains(nameLower, "the "+lastWordLower) {
+				return strings.Join(words[:len(words)-1], " ")
+			}
+		}
+	}
+
+	return name
+}
+
 // CleanMovieName converts release group folder to clean Jellyfin format
 // Example: "Movie.Name.2024.1080p.BluRay.x264-GROUP" -> "Movie Name (2024)"
 func CleanMovieName(name string) string {
+	// Strip file extension FIRST (if present)
+	ext := strings.ToLower(filepath.Ext(name))
+	videoExts := []string{".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".flv", ".webm", ".mpg", ".mpeg"}
+	for _, ve := range videoExts {
+		if ext == ve {
+			name = strings.TrimSuffix(name, ext)
+			break
+		}
+	}
+
 	// Extract year first (before any modifications)
 	year := ExtractYear(name)
 
-	// Strip release group info FIRST (handles dots, resolution, codecs, etc.)
+	// Strip release group info (handles dots, resolution, codecs, etc.)
 	name = StripReleaseGroup(name)
 
-	// Now remove year from the cleaned name
-	name = removeYear(name)
+	// Remove only the specific release year (preserves years in titles like "2049")
+	name = removeSpecificYear(name, year)
 
 	// Collapse multiple spaces and trim
 	name = collapseSpacesRegex.ReplaceAllString(name, " ")
 	name = strings.TrimSpace(name)
 
-	// Title case (using cases.Title instead of deprecated strings.Title)
-	caser := cases.Title(language.English)
-	name = caser.String(name)
+	// Strip orphaned release groups that weren't caught by patterns
+	name = stripOrphanedReleaseGroups(name)
+
+	// Trim again after orphan removal
+	name = strings.TrimSpace(name)
+
+	// Title case with custom handling for ordinals
+	name = titleCaseWithOrdinals(name)
 
 	// Add year if found
 	if year != "" {
@@ -334,6 +474,52 @@ func CleanMovieName(name string) string {
 	}
 
 	return name
+}
+
+// titleCaseWithOrdinals applies title case while preserving ordinal numbers (1st, 2nd, 25th, etc.)
+func titleCaseWithOrdinals(s string) string {
+	// Case-insensitive ordinal detection
+	ordinalRegex := regexp.MustCompile(`(?i)\b(\d+)(st|nd|rd|th)\b`)
+
+	// Find all ordinals and their positions
+	type ordinalMatch struct {
+		original string
+		number   string
+		suffix   string
+	}
+
+	matches := ordinalRegex.FindAllStringSubmatch(s, -1)
+	ordinals := make([]ordinalMatch, len(matches))
+
+	// Store ordinals before title casing
+	for i, match := range matches {
+		if len(match) > 2 {
+			ordinals[i] = ordinalMatch{
+				original: match[0],
+				number:   match[1],
+				suffix:   match[2],
+			}
+		}
+	}
+
+	// Replace ordinals with unique placeholders (use special chars to avoid title-casing)
+	for i, ord := range ordinals {
+		placeholder := fmt.Sprintf("§§§%d§§§", i)
+		s = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(ord.original)).ReplaceAllString(s, placeholder)
+	}
+
+	// Apply title case
+	caser := cases.Title(language.English)
+	s = caser.String(s)
+
+	// Restore ordinals with lowercase suffix
+	for i, ord := range ordinals {
+		placeholder := fmt.Sprintf("§§§%d§§§", i)
+		restored := ord.number + strings.ToLower(ord.suffix)
+		s = strings.ReplaceAll(s, placeholder, restored)
+	}
+
+	return s
 }
 
 // ExtractEpisodeInfo extracts S##E## from filename

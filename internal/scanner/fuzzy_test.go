@@ -95,6 +95,14 @@ func TestCleanMovieName(t *testing.T) {
 		{"Movie.Name.2024.1080p.BluRay.x264-GROUP", "Movie Name (2024)"},
 		{"Movie.Name.(2024)", "Movie Name (2024)"},
 		{"Movie_Name_(2024)", "Movie Name (2024)"},
+		{"25th.Hour.2002.1080p.BluRay.H264.AC3.DD5.1.mp4", "25th Hour (2002)"},
+		{"Shrek 2 (2004) 1080p 10bit Bluray x265 HEVC [Org BD 2.0 Hindi + DD 5.1 English] MSubs ~ TombDoc.mkv", "Shrek 2 (2004)"},
+		{"The Matrix 1999 2160p UHD BluRay x265 HDR10", "The Matrix (1999)"},
+		{"Inception.2010.1080p.BluRay.x264.DTS-HD.MA.5.1", "Inception (2010)"},
+		{"21st Century", "21st Century"},
+		{"The Man Who Fell to Earth 1976 HEVC D3FiL3R (iso)", "The Man Who Fell To Earth (1976)"},
+		{"Blade.Runner.2049.2017.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT", "Blade Runner 2049 (2017)"},
+		{"The.Matrix.1999.REMASTERED.1080p.BluRay.x265.10bit.HDR.DTS-X.7.1-YTS", "The Matrix (1999)"},
 	}
 
 	for _, tt := range tests {
@@ -149,5 +157,35 @@ func TestExtractEpisodeInfo(t *testing.T) {
 			t.Errorf("ExtractEpisodeInfo(%q) = S%02dE%02d, want S%02dE%02d",
 				tt.input, season, episode, tt.expectSeason, tt.expectEpisode)
 		}
+	}
+}
+
+func TestPinocchioWill1869(t *testing.T) {
+	input := "Pinocchio.1940.1080p.BluRay.H264.AC3.DD5.1.Will1869"
+	expected := "Pinocchio (1940)"
+	result := CleanMovieName(input)
+
+	if result != expected {
+		t.Errorf("CleanMovieName(%q) = %q, want %q", input, result, expected)
+	}
+}
+
+func TestCleanMovieNameSNAKE(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"The Pentagon Wars 1998 1080p WEBRip X264 Ac3 SNAKE", "The Pentagon Wars (1998)"},
+		{"The Pentagon Wars 1998 1080p WEBRip X264 Ac3 SNAKE.mkv", "The Pentagon Wars (1998)"},
+		{"The.Pentagon.Wars.1998.1080p.WEBRip.X264.Ac3-SNAKE", "The Pentagon Wars (1998)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := CleanMovieName(tt.input)
+			if got != tt.expected {
+				t.Errorf("CleanMovieName(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
 	}
 }
