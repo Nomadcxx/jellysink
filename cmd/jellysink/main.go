@@ -17,6 +17,7 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/config"
 	"github.com/Nomadcxx/jellysink/internal/daemon"
 	"github.com/Nomadcxx/jellysink/internal/reporter"
+	"github.com/Nomadcxx/jellysink/internal/scanner"
 	"github.com/Nomadcxx/jellysink/internal/ui"
 )
 
@@ -236,7 +237,12 @@ func runView(cmd *cobra.Command, args []string) {
 	// Check if user pressed Enter (clean operation)
 	m := finalModel.(ui.Model)
 	if m.ShouldClean() {
-		performClean(report)
+		editedTitles := m.GetEditedTitles()
+		if len(editedTitles) > 0 {
+			performManualRenames(report, editedTitles)
+		} else {
+			performClean(report)
+		}
 	}
 }
 
@@ -316,6 +322,82 @@ func loadReport(path string) (reporter.Report, error) {
 	}
 
 	return report, nil
+}
+
+func performManualRenames(report reporter.Report, editedTitles map[int]string) {
+	fmt.Println("\nApplying manual TV show renames...")
+	fmt.Printf("Shows to rename: %d\n\n", len(editedTitles))
+
+	// Confirm with user
+	fmt.Print("Are you sure you want to proceed? (yes/no): ")
+	var response string
+	fmt.Scanln(&response)
+
+	if response != "yes" {
+		fmt.Println("Rename cancelled.")
+		return
+	}
+
+	totalResults := []interface{}{}
+	successCount := 0
+	errorCount := 0
+
+	// Apply each rename
+	for idx, newTitle := range editedTitles {
+		if idx >= len(report.AmbiguousTVShows) {
+			fmt.Printf("⚠ Skipping invalid index %d\n", idx)
+			continue
+		}
+
+		resolution := report.AmbiguousTVShows[idx]
+		oldTitle := resolution.ResolvedTitle
+		if oldTitle == "" && resolution.FolderMatch != nil {
+			oldTitle = resolution.FolderMatch.Title
+		}
+		if oldTitle == "" && resolution.FilenameMatch != nil {
+			oldTitle = resolution.FilenameMatch.Title
+		}
+
+		fmt.Printf("\nRenaming: %s -> %s\n", oldTitle, newTitle)
+
+		// Apply rename to all library paths
+		for _, libPath := range report.LibraryPaths {
+			// Import scanner package
+			results, err := scanner.ApplyManualTVRename(libPath, oldTitle, newTitle, false)
+			if err != nil {
+				fmt.Printf("  ✗ Error in %s: %v\n", libPath, err)
+				errorCount++
+				continue
+			}
+
+			for _, result := range results {
+				totalResults = append(totalResults, result)
+				if result.Success {
+					successCount++
+					typeStr := "file"
+					if result.IsFolder {
+						typeStr = "folder"
+					}
+					fmt.Printf("  ✓ Renamed %s: %s\n", typeStr, filepath.Base(result.NewPath))
+				} else {
+					errorCount++
+					fmt.Printf("  ✗ Failed: %s - %s\n", result.OldPath, result.Error)
+				}
+			}
+		}
+	}
+
+	// Show results
+	fmt.Println("\nRename operation completed!")
+	fmt.Printf("✓ Successful renames: %d\n", successCount)
+	if errorCount > 0 {
+		fmt.Printf("✗ Errors: %d\n", errorCount)
+	}
+
+	// Save operation log
+	home, _ := os.UserHomeDir()
+	logPath := filepath.Join(home, ".local/share/jellysink/rename.log")
+	fmt.Printf("\nOperation log saved to: %s\n", logPath)
 }
 
 func performClean(report reporter.Report) {

@@ -24,6 +24,9 @@ var (
 	yearRemoveRegexes   []*regexp.Regexp
 	episodeSERegex      *regexp.Regexp
 	episodeXRegex       *regexp.Regexp
+	abbrevRegex         *regexp.Regexp
+	highCapsRegex       *regexp.Regexp
+	upperTokenRegex     *regexp.Regexp
 )
 
 func init() {
@@ -90,12 +93,8 @@ func init() {
 		// Parenthesized markers (iso, rip, etc.)
 		`\((?:iso|rip|cd\d|disc\d|disk\d)\)`,
 
-		// Release group suffix (e.g., "-GROUP" or "~ TombDoc") and hyphenated release groups
-		`\s?[-~]\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,
-		`-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,
+		// Known release groups (specific names only)
 		`\b(PSYCHD|MAG|CHAMELE0N|MIRCREW|MIRC|WILL1869|ASPiDe|CI?NEMIX|CiNEMiX|CINEMIX|MIRCREW)\b`,
-		// Hyphenated tokens attached to codecs (x264-...) catch any trailing hyphen groups
-		`[A-Za-z0-9]+-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,
 
 		// Bracketed content (e.g., "[Org BD 2.0 Hindi + DD 5.1 English]")
 		`\[.*?\]`,
@@ -133,10 +132,17 @@ func init() {
 		hyphenSuffixRegexes = append(hyphenSuffixRegexes, regexp.MustCompile(`(?i)`+p))
 	}
 
+	// Pre-compile uppercase detection for small abbreviations to avoid over-splitting
+	highCapsRegex = regexp.MustCompile(`(?i)^[A-Z]{1,4}$`)
+
 	// Pre-hyphen patterns to remove trailing groups before normalizing hyphens
+	// IMPORTANT: Use stricter patterns that only match known release group patterns
+	// to avoid removing legitimate hyphenated title words like "-Cristo"
 	preHyphenPatterns := []string{
-		`-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,       // -GROUP, -psychd-ml
-		`~\s?[A-Za-z0-9]+(?:\s[A-Za-z0-9]+)*$`, // ~ TombDoc
+		// Match hyphen-suffix with digits: -x264, -H264, -ML, -psychd-ml
+		`-[A-Za-z]*\d+[A-Za-z0-9]*(?:-[A-Za-z0-9]+)*$`,
+		// Match ~ prefix groups: ~ TombDoc
+		`~\s?[A-Za-z0-9]+(?:\s[A-Za-z0-9]+)*$`,
 	}
 	preHyphenRegexes = make([]*regexp.Regexp, 0, len(preHyphenPatterns))
 	for _, p := range preHyphenPatterns {
@@ -167,6 +173,13 @@ func init() {
 
 	episodeSERegex = regexp.MustCompile(`[Ss](\d{1,2})[Ee](\d{1,2})`)
 	episodeXRegex = regexp.MustCompile(`(\d{1,2})x(\d{1,2})`)
+
+	// Abbreviation and acronym detection for preservation during title casing
+	// Match abbreviations with 3+ letters that END WITH A DOT (R.I.P.D., D.E.B.S.) OR known ones (U.S.)
+	// This prevents matching "U.S.M" from "U.S.Marshals" by requiring the final dot
+	abbrevRegex = regexp.MustCompile(`\b(?:[A-Za-z]\.[A-Za-z]\.(?:[A-Za-z]\.)+|U\.S\.)`)
+	// Match uppercase acronyms: 8MM, RIPD, USA (2+ uppercase letters, optionally starting with digit)
+	upperTokenRegex = regexp.MustCompile(`\b\d*[A-Z]{2,}\b`)
 }
 
 // NormalizeName normalizes a media name for fuzzy matching
@@ -318,17 +331,114 @@ func ExtractResolution(name string) string {
 // StripReleaseGroup removes release group markers from name
 // Uses pre-compiled regexes for performance
 func StripReleaseGroup(name string) string {
-	// First, remove common hyphen-suffixes attached directly to filenames like
-	// "-GROUP" or "-psychd-ml" before we replace hyphens. This prevents
-	// these tokens from becoming standalone words after hyphen normalization.
+	// Helper to detect hyphen release-like segments
+	isHyphenReleaseLike := func(seg string) bool {
+		segLower := strings.ToLower(seg)
+
+		// Common known release group tokens
+		known := map[string]bool{
+			"group": true, "mag": true, "psychd": true, "mteam": true,
+			"mircrew": true, "mirc": true, "dj": true, "obfuscated": true, "obf": true,
+			"sparks": true, "rovers": true, "yts": true, "rarbg": true, "yify": true,
+		}
+		if known[segLower] {
+			return true
+		}
+
+		// Edition/quality markers that are often hyphenated to titles
+		// (e.g., "Unrated", "Extended", "Directors", "Remastered")
+		editionMarkers := map[string]bool{
+			"unrated": true, "extended": true, "uncut": true, "remastered": true,
+			"directors": true, "theatrical": true, "criterion": true, "imax": true,
+			"enhanced": true, "dc": true, "cut": true, "edition": true,
+		}
+		if editionMarkers[segLower] {
+			return true
+		}
+
+		// Only consider ALL UPPERCASE segments as potential release groups (length <= 4)
+		if len(seg) <= 4 && strings.ToUpper(seg) == seg && strings.ToLower(seg) != seg {
+			return true
+		}
+
+		// Segments that are purely alphanumeric uppercase (no lowercase) like "MTEAM", "X264"
+		if regexp.MustCompile(`^[A-Z0-9]+$`).MatchString(seg) {
+			return true
+		}
+
+		// Segments with mixed case but ending in digits (e.g., "MTeam1", "Group2")
+		if regexp.MustCompile(`^[A-Z][A-Za-z]*\d+$`).MatchString(seg) {
+			return true
+		}
+
+		// NOT release-like: lowercase or title-case words like "Cristo", "Monte"
+		return false
+	}
+
+	// First, remove common trailing hyphen-suffixes attached directly to filenames like
+	// "-GROUP" or "-psychd-ml" before we replace dots/underscores. This prevents
+	// these tokens from becoming standalone words after normalization.
 	for _, re := range preHyphenRegexes {
 		name = re.ReplaceAllString(name, " ")
 	}
 
-	// Replace dots, underscores and hyphens with spaces FIRST to separate tokens
+	// Before replacing dots/underscores, preserve abbreviations that need dots maintained.
+	// These will be restored after processing, just before returning.
+	abbrMap := map[string]string{}
+	abbrMatches := abbrevRegex.FindAllString(name, -1)
+	for i, abbr := range abbrMatches {
+		// Use a placeholder unlikely to appear in filenames and which won't be affected by processing
+		placeholder := fmt.Sprintf("§ABBR%d§", i)
+
+		// Preserve trailing dot if abbreviation ends with one
+		hasTrailingDot := strings.HasSuffix(abbr, ".")
+
+		abbrMap[placeholder] = abbr
+		name = strings.ReplaceAll(name, abbr, placeholder)
+
+		// Add marker for trailing dot that should be preserved
+		if hasTrailingDot {
+			name = strings.ReplaceAll(name, placeholder+".", placeholder+"§DOT§")
+		}
+	}
+
+	// Replace dots and underscores with spaces (but keep hyphens to preserve hyphenated
+	// title words like Monte-Cristo)
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
-	name = strings.ReplaceAll(name, "-", " ")
+
+	// Tokenize name to process hyphenated tokens safely
+	words := strings.Fields(name)
+	processed := make([]string, 0, len(words))
+	for _, w := range words {
+		// If token contains hyphen, check if ONLY the last segment is a release group marker
+		if strings.Contains(w, "-") {
+			parts := strings.Split(w, "-")
+
+			// Only strip the last segment if it's release-like
+			// This preserves legitimate hyphenated words like "Monte-Cristo"
+			if len(parts) >= 2 {
+				lastSeg := parts[len(parts)-1]
+
+				// If last segment is release-like, remove it and keep the rest
+				if isHyphenReleaseLike(lastSeg) {
+					parts = parts[:len(parts)-1]
+				}
+			}
+
+			// If nothing remains after stripping, skip this word entirely
+			if len(parts) == 0 {
+				continue
+			}
+
+			// Rejoin with '-' to preserve legitimate hyphenation
+			processed = append(processed, strings.Join(parts, "-"))
+			continue
+		}
+		processed = append(processed, w)
+	}
+
+	name = strings.Join(processed, " ")
 
 	// Apply all pre-compiled release group patterns
 	for _, re := range releasePatterns {
@@ -343,8 +453,28 @@ func StripReleaseGroup(name string) string {
 
 	// Collapse spaces using pre-compiled regex
 	name = collapseSpacesRegex.ReplaceAllString(name, " ")
+	name = strings.TrimSpace(name)
 
-	return strings.TrimSpace(name)
+	// Restore abbreviation placeholders back to original form (with dots)
+	// This happens at the very end, so abbreviations are preserved through all processing
+	for placeholder, orig := range abbrMap {
+		// Restore trailing dot marker if present (e.g., "D.E.B.S..2004" → "D.E.B.S. 2004")
+		name = strings.ReplaceAll(name, placeholder+"§DOT§", orig+". ")
+		// Regular restoration - add space after abbreviation to separate from following text
+		// (e.g., "U.S.Marshals" → "U.S. Marshals", "R.I.P.D.2" → "R.I.P.D. 2")
+		name = strings.ReplaceAll(name, placeholder, orig+" ")
+	}
+
+	// Cleanup: remove double spaces and trim
+	name = collapseSpacesRegex.ReplaceAllString(name, " ")
+	name = strings.TrimSpace(name)
+
+	// Remove trailing hyphens that may remain after stripping release groups/editions
+	// (e.g., "The Invitation-Unrated" → "The Invitation-" after stripping "Unrated")
+	name = strings.TrimRight(name, "-")
+	name = strings.TrimSpace(name)
+
+	return name
 }
 
 // SimilarityRatio calculates similarity between two strings (0.0 to 1.0)
@@ -442,12 +572,28 @@ func stripOrphanedReleaseGroups(name string) string {
 		"will1869": true, "aspide": true, "nueng": true,
 	}
 
+	// Acronyms that should NOT be removed even if they match known groups
+	// These are common TV show/movie acronyms that happen to conflict with release group names
+	preservedAcronyms := map[string]bool{
+		"tng": true, // Star Trek: The Next Generation (conflicts with NTG release group)
+	}
+
 	words := strings.Fields(name)
 
 	// Only remove known groups from the tail. This avoids stripping title words in the middle.
 	for len(words) > 0 {
+		// Safety: don't remove the last word if it would leave us with an empty title
+		if len(words) == 1 {
+			break
+		}
+
 		last := words[len(words)-1]
 		lastLower := strings.ToLower(last)
+
+		// Don't remove if it's a preserved acronym
+		if preservedAcronyms[lastLower] {
+			break
+		}
 
 		// If the last word is in the known groups, remove it
 		if _, ok := knownGroups[lastLower]; ok {
@@ -513,11 +659,22 @@ func CleanMovieName(name string) string {
 	if year != "" {
 		idx := strings.LastIndex(name, year)
 		if idx != -1 {
-			// Move index left to strip preceding punctuation like '(' '[' '.' '-' and whitespace
+			// Before truncating, check if text before year contains an abbreviation pattern
+			// like "S.W.A.T." or "N.C.I.S." (letter-dot-letter-dot with 3+ occurrences)
+			textBeforeYear := name[:idx]
+			hasAbbrevPattern := abbrevRegex.MatchString(textBeforeYear)
+
+			// Move index left to strip preceding punctuation like '(' '[' ' ' '_' '-' and whitespace
 			startIdx := idx
 			for startIdx > 0 {
 				ch := name[startIdx-1]
-				if ch == '(' || ch == '[' || ch == '.' || ch == ' ' || ch == '_' || ch == '-' {
+				if ch == '.' {
+					// If we detected an abbreviation pattern, don't strip dots - just stop here
+					if hasAbbrevPattern {
+						break
+					}
+					startIdx--
+				} else if ch == '(' || ch == '[' || ch == ' ' || ch == '_' || ch == '-' {
 					startIdx--
 				} else {
 					break
@@ -540,11 +697,18 @@ func CleanMovieName(name string) string {
 	// Strip orphaned release groups that weren't caught by patterns
 	name = stripOrphanedReleaseGroups(name)
 
-	// Trim again after orphan removal
+	// Trim again after orphan removal (including trailing hyphens)
+	name = strings.TrimRight(name, "-")
 	name = strings.TrimSpace(name)
 
 	// Title case with custom handling for ordinals
 	name = titleCaseWithOrdinals(name)
+
+	// Clean up any remaining double dots (can happen with abbreviations like "D.E.B.S..")
+	for strings.Contains(name, "..") {
+		name = strings.ReplaceAll(name, "..", ".")
+	}
+	name = strings.TrimSpace(name)
 
 	// Add year if found
 	if year != "" {
@@ -554,7 +718,10 @@ func CleanMovieName(name string) string {
 	return name
 }
 
-// titleCaseWithOrdinals applies title case while preserving ordinal numbers (1st, 2nd, 25th, etc.)
+// titleCaseWithOrdinals applies title case while preserving:
+// - Ordinal numbers (1st, 2nd, 25th)
+// - Abbreviations (U.S., R.I.P.D., D.E.B.S.)
+// - Uppercase acronyms (8MM, RIPD, USA)
 func titleCaseWithOrdinals(s string) string {
 	// Case-insensitive ordinal detection
 	ordinalRegex := regexp.MustCompile(`(?i)\b(\d+)(st|nd|rd|th)\b`)
@@ -580,21 +747,54 @@ func titleCaseWithOrdinals(s string) string {
 		}
 	}
 
-	// Replace ordinals with unique placeholders (use special chars to avoid title-casing)
+	// Replace ordinals with unique placeholders (use § special chars + numbers only)
+	// IMPORTANT: Use only numbers in placeholders to avoid TitleCase modifying them
 	for i, ord := range ordinals {
-		placeholder := fmt.Sprintf("§§§%d§§§", i)
+		placeholder := fmt.Sprintf("§§§%d000§§§", i) // Ordinals: §§§0000§§§, §§§1000§§§, etc.
 		s = regexp.MustCompile(`(?i)`+regexp.QuoteMeta(ord.original)).ReplaceAllString(s, placeholder)
 	}
 
-	// Apply title case
+	// Find and preserve ALL abbreviations (U.S., R.I.P.D., D.E.B.S., etc.)
+	abbrMatches := abbrevRegex.FindAllString(s, -1)
+	abbrMap := make(map[string]string)
+	for i, abbr := range abbrMatches {
+		placeholder := fmt.Sprintf("§§§%d111§§§", i) // Abbreviations: §§§0111§§§, §§§1111§§§, etc.
+		abbrMap[placeholder] = abbr
+		s = strings.ReplaceAll(s, abbr, placeholder)
+	}
+
+	// Find and preserve uppercase acronyms (8MM, RIPD, USA, etc.)
+	acronymMatches := upperTokenRegex.FindAllString(s, -1)
+	acronymMap := make(map[string]string)
+	for i, acr := range acronymMatches {
+		// Skip if it looks like a placeholder we just created
+		if strings.Contains(acr, "§") {
+			continue
+		}
+		placeholder := fmt.Sprintf("§§§%d222§§§", i) // Acronyms: §§§0222§§§, §§§1222§§§, etc.
+		acronymMap[placeholder] = acr
+		s = strings.ReplaceAll(s, acr, placeholder)
+	}
+
+	// Apply title case (§ symbols survive unchanged)
 	caser := cases.Title(language.English)
 	s = caser.String(s)
 
 	// Restore ordinals with lowercase suffix
 	for i, ord := range ordinals {
-		placeholder := fmt.Sprintf("§§§%d§§§", i)
+		placeholder := fmt.Sprintf("§§§%d000§§§", i)
 		restored := ord.number + strings.ToLower(ord.suffix)
 		s = strings.ReplaceAll(s, placeholder, restored)
+	}
+
+	// Restore abbreviations to original form
+	for placeholder, orig := range abbrMap {
+		s = strings.ReplaceAll(s, placeholder, orig)
+	}
+
+	// Restore acronyms to original uppercase form
+	for placeholder, orig := range acronymMap {
+		s = strings.ReplaceAll(s, placeholder, orig)
 	}
 
 	return s
