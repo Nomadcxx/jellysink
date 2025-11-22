@@ -70,11 +70,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Scan complete! Found %d duplicate groups\n", report.TotalDuplicates)
+	fmt.Printf("Scan complete! Found %d duplicate groups", report.TotalDuplicates)
+	if len(report.ComplianceIssues) > 0 {
+		fmt.Printf(" + %d compliance issues\n", len(report.ComplianceIssues))
+	} else {
+		fmt.Println()
+	}
 	fmt.Printf("Report saved to: %s\n", reportPath)
 
 	// Send notification
-	if err := daemon.NotifyUser(reportPath, report.TotalDuplicates, report.SpaceToFree); err != nil {
+	if err := daemon.NotifyUser(reportPath, report.TotalDuplicates, report.SpaceToFree, len(report.ComplianceIssues)); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to send notification: %v\n", err)
 	}
 

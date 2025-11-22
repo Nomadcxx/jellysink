@@ -8,10 +8,16 @@ import (
 )
 
 // NotifyUser sends a desktop notification about the scan completion
-func NotifyUser(reportPath string, totalDuplicates int, spaceToFree int64) error {
-	// Format message
-	message := fmt.Sprintf("Found %d duplicate groups (%.2f GB to free)",
-		totalDuplicates, float64(spaceToFree)/(1024*1024*1024))
+func NotifyUser(reportPath string, totalDuplicates int, spaceToFree int64, complianceIssues int) error {
+	// Format message with both duplicates and compliance issues
+	var message string
+	if complianceIssues > 0 {
+		message = fmt.Sprintf("Found %d duplicate groups (%.2f GB to free) + %d compliance issues",
+			totalDuplicates, float64(spaceToFree)/(1024*1024*1024), complianceIssues)
+	} else {
+		message = fmt.Sprintf("Found %d duplicate groups (%.2f GB to free)",
+			totalDuplicates, float64(spaceToFree)/(1024*1024*1024))
+	}
 
 	// Try notify-send first (most Linux desktops)
 	if err := notifySend("jellysink - Scan Complete", message); err == nil {

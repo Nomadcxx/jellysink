@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,17 +43,22 @@ func TestScoreMovieFile(t *testing.T) {
 		{
 			"4K file",
 			MovieFile{Size: 10 * 1024 * 1024 * 1024, Resolution: "2160p", IsEmpty: false},
-			410, // 400 (2160p) + 10 (10GB)
+			410, // 10 (size) + 400 (2160p)
 		},
 		{
 			"1080p file",
 			MovieFile{Size: 5 * 1024 * 1024 * 1024, Resolution: "1080p", IsEmpty: false},
-			305, // 300 (1080p) + 5 (5GB)
+			305, // 5 (size) + 300 (1080p)
 		},
 		{
 			"720p file",
 			MovieFile{Size: 2 * 1024 * 1024 * 1024, Resolution: "720p", IsEmpty: false},
-			202, // 200 (720p) + 2 (2GB)
+			202, // 2 (size) + 200 (720p)
+		},
+		{
+			"Unknown resolution, large file",
+			MovieFile{Size: 5 * 1024 * 1024 * 1024, Resolution: "unknown", IsEmpty: false},
+			505, // 5 (size) + 5*100 (unknown bonus)
 		},
 	}
 
@@ -68,6 +74,8 @@ func TestScoreMovieFile(t *testing.T) {
 	small480p := MovieFile{Size: 500 * 1024 * 1024, Resolution: "480p", IsEmpty: false}
 	med720p := MovieFile{Size: 2 * 1024 * 1024 * 1024, Resolution: "720p", IsEmpty: false}
 	large1080p := MovieFile{Size: 5 * 1024 * 1024 * 1024, Resolution: "1080p", IsEmpty: false}
+	largeUnknown := MovieFile{Size: 5 * 1024 * 1024 * 1024, Resolution: "unknown", IsEmpty: false}
+	small1080p := MovieFile{Size: 2 * 1024 * 1024 * 1024, Resolution: "1080p", IsEmpty: false}
 
 	if scoreMovieFile(empty) >= scoreMovieFile(small480p) {
 		t.Error("Empty file should score lower than any non-empty file")
@@ -79,6 +87,13 @@ func TestScoreMovieFile(t *testing.T) {
 
 	if scoreMovieFile(med720p) >= scoreMovieFile(large1080p) {
 		t.Error("720p should score lower than 1080p")
+	}
+
+	// Critical test: Large unknown resolution file should beat small 1080p file
+	// This prevents release group files from being overvalued
+	if scoreMovieFile(largeUnknown) <= scoreMovieFile(small1080p) {
+		t.Errorf("Large unknown resolution file should beat small 1080p file (got %d vs %d)",
+			scoreMovieFile(largeUnknown), scoreMovieFile(small1080p))
 	}
 }
 
@@ -214,5 +229,146 @@ func TestScanMovies(t *testing.T) {
 
 	if !foundGroup {
 		t.Error("Expected to find a group with 2+ files")
+	}
+}
+
+func TestScanMoviesSameFolderDifferentFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create folder with two different files (simulates Mission to Mars case)
+	movieDir := filepath.Join(tmpDir, "Mission to Mars (2000)")
+	os.MkdirAll(movieDir, 0755)
+
+	// Main file
+	movie1 := filepath.Join(movieDir, "Mission.To.Mars.2000.1080p.BluRay.x264.mkv")
+	os.WriteFile(movie1, []byte("fake video data large file"), 0644)
+
+	// Sample file
+	movie2 := filepath.Join(movieDir, "Sample.Mission.To.Mars.2000.1080p.BluRay.x264.mkv")
+	os.WriteFile(movie2, []byte("sample"), 0644)
+
+	// Scan for duplicates
+	duplicates, err := ScanMovies([]string{tmpDir})
+	if err != nil {
+		t.Fatalf("ScanMovies() error: %v", err)
+	}
+
+	// Should find ONE duplicate group with TWO files
+	if len(duplicates) != 1 {
+		t.Errorf("Expected 1 duplicate group, got %d", len(duplicates))
+	}
+
+	if len(duplicates) > 0 && len(duplicates[0].Files) != 2 {
+		t.Errorf("Expected 2 files in duplicate group, got %d", len(duplicates[0].Files))
+	}
+}
+
+func TestScanMoviesDifferentFoldersSameMovie(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Case 1: Compliant folder structure
+	movieDir1 := filepath.Join(tmpDir, "Mama (2013)")
+	os.MkdirAll(movieDir1, 0755)
+	movie1 := filepath.Join(movieDir1, "Mama (2013).mkv")
+	os.WriteFile(movie1, []byte("fake video data 5GB worth"), 0644)
+
+	// Case 2: Release group folder with different content
+	movieDir2 := filepath.Join(tmpDir, "Mama.2013.1080p.BluRay.x264-GROUP")
+	os.MkdirAll(movieDir2, 0755)
+	movie2 := filepath.Join(movieDir2, "Mama.2013.1080p.BluRay.x264-GROUP.mkv")
+	os.WriteFile(movie2, []byte("smaller"), 0644)
+
+	// Scan for duplicates
+	duplicates, err := ScanMovies([]string{tmpDir})
+	if err != nil {
+		t.Fatalf("ScanMovies() error: %v", err)
+	}
+
+	// Should find ONE duplicate group with TWO files
+	if len(duplicates) != 1 {
+		t.Errorf("Expected 1 duplicate group, got %d", len(duplicates))
+		for i, dup := range duplicates {
+			t.Logf("Group %d: %s|%s with %d files", i, dup.NormalizedName, dup.Year, len(dup.Files))
+		}
+	}
+
+	if len(duplicates) > 0 && len(duplicates[0].Files) != 2 {
+		t.Errorf("Expected 2 files in duplicate group, got %d", len(duplicates[0].Files))
+		if len(duplicates[0].Files) > 0 {
+			for i, f := range duplicates[0].Files {
+				t.Logf("File %d: %s", i, f.Path)
+			}
+		}
+	}
+}
+
+func TestDuplicateAndComplianceIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Simulate the exact user scenario: two versions of Mama (2013)
+	// Version 1: Compliant naming
+	movieDir1 := filepath.Join(tmpDir, "Mama (2013)")
+	os.MkdirAll(movieDir1, 0755)
+	movie1 := filepath.Join(movieDir1, "Mama (2013).mkv")
+	os.WriteFile(movie1, make([]byte, 5*1024*1024*1024), 0644) // 5GB
+
+	// Version 2: Release group folder
+	movieDir2 := filepath.Join(tmpDir, "Mama.2013.1080p.BluRay.x264-GROUP")
+	os.MkdirAll(movieDir2, 0755)
+	movie2 := filepath.Join(movieDir2, "Mama.2013.1080p.BluRay.x264-GROUP.mkv")
+	os.WriteFile(movie2, make([]byte, 2*1024*1024*1024), 0644) // 2GB
+
+	// Step 1: Scan for duplicates
+	duplicates, err := ScanMovies([]string{tmpDir})
+	if err != nil {
+		t.Fatalf("ScanMovies() error: %v", err)
+	}
+
+	if len(duplicates) != 1 {
+		t.Fatalf("Expected 1 duplicate group, got %d", len(duplicates))
+	}
+
+	// Debug: Check file info before marking
+	t.Logf("Files in duplicate group:")
+	for i, f := range duplicates[0].Files {
+		info, _ := os.Stat(f.Path)
+		t.Logf("  File %d: %s", i, filepath.Base(f.Path))
+		t.Logf("    Path: %s", f.Path)
+		t.Logf("    Size (stored): %d bytes (%.2f GB)", f.Size, float64(f.Size)/(1024*1024*1024))
+		t.Logf("    Size (actual): %d bytes", info.Size())
+		t.Logf("    Resolution: %s", f.Resolution)
+		t.Logf("    Score: %d", scoreMovieFile(f))
+	}
+
+	// Mark keep/delete
+	marked := MarkKeepDelete(duplicates)
+
+	t.Logf("After MarkKeepDelete:")
+	t.Logf("  Keeper: %s (score: %d)", filepath.Base(marked[0].Files[0].Path), scoreMovieFile(marked[0].Files[0]))
+	for i := 1; i < len(marked[0].Files); i++ {
+		t.Logf("  Delete: %s (score: %d)", filepath.Base(marked[0].Files[i].Path), scoreMovieFile(marked[0].Files[i]))
+	}
+
+	deleteList := GetDeleteList(marked)
+
+	// Step 2: Scan for compliance issues (excluding files marked for deletion)
+	issues, err := ScanMovieCompliance([]string{tmpDir}, deleteList...)
+	if err != nil {
+		t.Fatalf("ScanMovieCompliance() error: %v", err)
+	}
+
+	t.Logf("Compliance scan found %d issues:", len(issues))
+	for _, issue := range issues {
+		t.Logf("  - %s -> %s", issue.Path, issue.SuggestedPath)
+		if strings.Contains(issue.Problem, "COLLISION") {
+			t.Errorf("COLLISION detected! This should not happen after duplicate scan: %s", issue.Problem)
+		}
+	}
+
+	// We expect ZERO compliance issues because:
+	// - movie1 is compliant (Mama (2013)/Mama (2013).mkv) and is the keeper
+	// - movie2 is non-compliant but should be in deleteList, so excluded from compliance scan
+	if len(issues) > 1 {
+		t.Errorf("Expected 0-1 compliance issues, got %d (one file should be keeper, other should be in deleteList)", len(issues))
 	}
 }

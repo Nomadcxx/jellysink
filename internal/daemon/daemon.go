@@ -47,8 +47,11 @@ func (d *Daemon) RunScan(ctx context.Context) (string, error) {
 		}
 		report.MovieDuplicates = movieDuplicates
 
-		// Scan for compliance issues
-		complianceIssues, err := scanner.ScanMovieCompliance(d.config.Libraries.Movies.Paths)
+		// Extract list of files to be deleted (skip these in compliance scan)
+		filesToDelete := scanner.GetDeleteList(movieDuplicates)
+
+		// Scan for compliance issues (excluding duplicate files)
+		complianceIssues, err := scanner.ScanMovieCompliance(d.config.Libraries.Movies.Paths, filesToDelete...)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan movie compliance: %w", err)
 		}
@@ -71,8 +74,11 @@ func (d *Daemon) RunScan(ctx context.Context) (string, error) {
 		}
 		report.TVDuplicates = tvDuplicates
 
-		// Scan for TV compliance issues
-		tvComplianceIssues, err := scanner.ScanTVCompliance(d.config.Libraries.TV.Paths)
+		// Extract list of TV files to be deleted (skip these in compliance scan)
+		tvFilesToDelete := scanner.GetTVDeleteList(tvDuplicates)
+
+		// Scan for TV compliance issues (excluding duplicate files)
+		tvComplianceIssues, err := scanner.ScanTVCompliance(d.config.Libraries.TV.Paths, tvFilesToDelete...)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan TV compliance: %w", err)
 		}
