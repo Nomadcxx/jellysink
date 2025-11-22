@@ -30,6 +30,36 @@ func TestReleaseGroupRemoval(t *testing.T) {
 			input:    "Movie Name 2024 1080p 5Audio DTS MA7 1 RARBG",
 			expected: "Movie Name (2024)",
 		},
+		// Invasion of the Body Snatchers - commentary tag should be removed
+		{
+			name:     "Invasion Plus Commentary",
+			input:    "Invasion.of.the.Body.Snatchers.1956.DVDRip.Plus.Commentary.x264-MaG-Chamele0n.mkv",
+			expected: "Invasion Of The Body Snatchers (1956)",
+		},
+		// Men at Work - hyphenated group and multi-hyphen group
+		{
+			name:     "Men At Work psychd-ml",
+			input:    "men.at.work.1990.720p.bluray.x264-psychd-ml.mkv",
+			expected: "Men At Work (1990)",
+		},
+		// Idea of You - NORDiC should be stripped
+		{
+			name:     "Idea of You Nordic",
+			input:    "The.Idea.of.You.2024.NORDiC.1080p.WEB-DL.H.265.DDP5.1-CiNEMiX.mkv",
+			expected: "The Idea Of You (2024)",
+		},
+		// Vite Vendute - foreign filename, prefer parent
+		{
+			name:     "Vite Vendute foreign",
+			input:    "Vite.vendute.2024.1080p.H264.iTA.Fre.AC3.5.1.Sub.iTA.EnG.NUEnG.AsPiDe-.MIRCrew.mkv",
+			expected: "Vite Vendute (2024)",
+		},
+		// Thelma O Unicornio - translate then keep parent
+		{
+			name:     "Thelma O Unicornio",
+			input:    "Thelma.O.Unicornio.2024.1080p.NF.WEB-DL.DDP5.1.Atmos.x264.DUAL-CBR.mkv",
+			expected: "Thelma The Unicorn (2024)",
+		},
 	}
 
 	for _, tt := range tests {

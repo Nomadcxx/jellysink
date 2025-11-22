@@ -39,12 +39,22 @@ func init() {
 		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\d\s\d\b`,                // Audio with channels
 		`\b(DD\+?|DDP|E?AC3|AAC|AC3)\b`,                      // Audio without channels
 		`\b(TrueHD|Atmos|FLAC|PCM|Opus|MP3|DTS)\b`,           // Other audio codecs
-		`\d+Audio`,   // Orphaned audio markers like "3Audio"
-		`MA\d+\s\d+`, // Orphaned MA markers like "MA5 1"
+		`\d+Audio`,                             // Orphaned audio markers like "3Audio"
+		`MA\d+\s\d+`,                           // Orphaned MA markers like "MA5 1"
+		`\b\d\.\d\b`,                           // Matches 5.1, 7.1 etc.
+		`\bHD\b`,                               // Remove solitary HD tokens
+		`\bCBR\b`,                              // Remove CBR quality token
+		`\b(DUAL|DUAL-CBR|DUAL-ENC|CBR|CRF)\b`, // Remove DUAL/quality tokens
 
 		// Audio channels (after audio codecs)
 		`\b\d\s\d\b`, // 7 1, 5 1, 2 0
+		`\b\d\.\d\b`, // Matches 5.1, 7.1 etc.
 		`\b(Stereo|Mono)\b`,
+		// Commentary markers
+		`\b(Plus Commentary|Commentary|Audio Commentary)\b`,
+		`\b(Plus|Extended Commentary)\b`,
+		// Locale tags (e.g., NORDiC)
+		`\b(NORDiC|NF|ATVP|HULU)\b`,
 
 		// Source types
 		`\b(BluRay|Blu-ray|BDRip|BRRip|REMUX|WEB-DL|WEBDL|WEBRip|WEB)\b`,
@@ -53,6 +63,9 @@ func init() {
 
 		// Streaming platforms
 		`\b(AMZN|NF|DSNP|HMAX|HULU|ATVP|PCOK|PMTP)\b`,
+
+		// Locale/language and subtitle markers
+		`\b(ITA|FRE|FRA|ENG|EN|ESP|ES|SPA|SUB|SUBS|SUBBED|DUB|DUBBED|DUAL|MULTI)\b`,
 
 		// Video codecs (both spaced and non-spaced variants)
 		`\bH\s?26[456]\b`, // H 264, H264, H 265, H265, etc.
@@ -75,8 +88,12 @@ func init() {
 		// Parenthesized markers (iso, rip, etc.)
 		`\((?:iso|rip|cd\d|disc\d|disk\d)\)`,
 
-		// Release group suffix (e.g., "-GROUP" or "~ TombDoc")
+		// Release group suffix (e.g., "-GROUP" or "~ TombDoc") and hyphenated release groups
 		`\s?[-~]\s?[A-Za-z0-9]+(\s[A-Za-z0-9]+)*$`,
+		`-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,
+		`\b(PSYCHD|MAG|CHAMELE0N|MIRCREW|MIRC|WILL1869|ASPiDe|CI?NEMIX|CiNEMiX|CINEMIX|MIRCREW)\b`,
+		// Hyphenated tokens attached to codecs (x264-...) catch any trailing hyphen groups
+		`[A-Za-z0-9]+-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,
 
 		// Bracketed content (e.g., "[Org BD 2.0 Hindi + DD 5.1 English]")
 		`\[.*?\]`,
@@ -265,9 +282,10 @@ func ExtractResolution(name string) string {
 // StripReleaseGroup removes release group markers from name
 // Uses pre-compiled regexes for performance
 func StripReleaseGroup(name string) string {
-	// Replace dots and underscores with spaces FIRST
+	// Replace dots, underscores and hyphens with spaces FIRST to separate tokens
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
+	name = strings.ReplaceAll(name, "-", " ")
 
 	// Apply all pre-compiled release group patterns
 	for _, re := range releasePatterns {
@@ -365,46 +383,54 @@ func min(a, b, c int) int {
 // These are typically alphanumeric strings with mixed case (e.g., "D3FiL3R", "RARBG", "YTS")
 func stripOrphanedReleaseGroups(name string) string {
 	// Common release group patterns (exact matches only, case-insensitive)
-	knownGroups := []string{
-		"RARBG", "YTS", "YIFY", "ETRG", "FGT", "MkvCage",
-		"STUTTERSHIT", "SPARKS", "ROVERS", "PHOENiX", "CMRG",
-		"EVO", "ION10", "PSA", "AFG", "SAMPA", "TGx", "SNAKE",
-		"D3FiL3R", "FiSTWORLD", "CRYS", "HANDJOB", "RightSiZE",
-		"NTb", "NTG", "GETiT", "PiGNUS", "BTN", "DON", "CtrlHD",
+	knownGroups := map[string]bool{
+		"rarbg": true, "yts": true, "yify": true, "etrg": true, "fgt": true, "mkvCage": true,
+		"stuttershit": true, "sparks": true, "rovers": true, "phoenix": true, "cmrg": true,
+		"evo": true, "ion10": true, "psa": true, "afg": true, "sampa": true, "tgx": true, "snake": true,
+		"d3fil3r": true, "fistworld": true, "crys": true, "handjob": true, "rightsize": true,
+		"ntb": true, "ntg": true, "getit": true, "pignus": true, "btn": true, "don": true, "ctrlhd": true,
+		"mag": true, "psychd": true, "ml": true, "mirc": true, "mircrow": true, "chamele0n": true, "cinemix": true, "mircrew": true,
+		"will1869": true, "aspide": true, "nueng": true,
 	}
 
-	// Check for known groups (case-insensitive)
 	words := strings.Fields(name)
-
-	for i, word := range words {
-		wordLower := strings.ToLower(word)
-		for _, group := range knownGroups {
-			if wordLower == strings.ToLower(group) {
-				// Remove this word
-				words = append(words[:i], words[i+1:]...)
-				return strings.Join(words, " ")
-			}
+	// Remove all known groups from anywhere in the name
+	filtered := make([]string, 0, len(words))
+	for _, w := range words {
+		if _, ok := knownGroups[strings.ToLower(w)]; !ok {
+			filtered = append(filtered, w)
 		}
 	}
 
-	// Pattern-based detection for unknown groups
-	// Match: alphanumeric with mixed case + numbers (e.g., "D3FiL3R", "x0r", "NTb")
-	// Only match if it's the last word (safeguard against matching title words)
-	if len(words) > 0 {
-		lastWord := words[len(words)-1]
-		lastWordLower := strings.ToLower(lastWord)
+	// Update name and words
+	name = strings.Join(filtered, " ")
+	words = filtered
 
-		// Check if last word looks like a release group:
-		// - Contains mix of letters and numbers
-		// - Has unusual capitalization (not Title Case or all lowercase)
-		// - Length between 3-15 characters
-		if len(lastWord) >= 3 && len(lastWord) <= 15 {
+	// Now iteratively remove release-like trailing tokens
+	for len(words) > 0 {
+		last := words[len(words)-1]
+		lastLower := strings.ToLower(last)
+
+		// Skip common English words that might be legitimate titles
+		exceptionPrefix := []string{"the", "a", "an", "of", "and", "in", "on"}
+		isException := false
+		for _, ex := range exceptionPrefix {
+			if strings.HasPrefix(lastLower, ex+" ") || lastLower == ex {
+				isException = true
+				break
+			}
+		}
+		if isException {
+			break
+		}
+
+		// Heuristics: remove last token if it's likely a release group
+		if len(last) >= 2 && len(last) <= 15 {
 			hasDigit := false
 			hasLetter := false
 			hasLower := false
 			hasUpper := false
-
-			for _, ch := range lastWord {
+			for _, ch := range last {
 				if ch >= '0' && ch <= '9' {
 					hasDigit = true
 				} else if ch >= 'a' && ch <= 'z' {
@@ -416,21 +442,25 @@ func stripOrphanedReleaseGroups(name string) string {
 				}
 			}
 
-			// If it has both letters and numbers, or unusual mixed case, it's likely a release group
+			// Remove if has letters and digits or if it is weirdly cased (release group style)
 			if hasLetter && hasDigit {
-				// Remove last word
-				return strings.Join(words[:len(words)-1], " ")
+				words = words[:len(words)-1]
+				continue
 			}
-
-			// All caps words at end are often release groups (but check length to avoid removing title words)
-			nameLower := strings.ToLower(name)
-			if hasUpper && !hasLower && len(lastWord) >= 4 && !strings.Contains(nameLower, "the "+lastWordLower) {
-				return strings.Join(words[:len(words)-1], " ")
+			if hasUpper && !hasLower && len(last) >= 3 {
+				words = words[:len(words)-1]
+				continue
+			}
+			// Also remove if last token is short upper case like RARBG or CBR
+			if hasUpper && len(last) <= 4 {
+				words = words[:len(words)-1]
+				continue
 			}
 		}
+		break
 	}
 
-	return name
+	return strings.Join(words, " ")
 }
 
 // CleanMovieName converts release group folder to clean Jellyfin format
@@ -448,6 +478,15 @@ func CleanMovieName(name string) string {
 
 	// Extract year first (before any modifications)
 	year := ExtractYear(name)
+
+	// If year exists, only keep the part of the string before the year.
+	// This removes resolution/codecs/release group tokens that come AFTER the year.
+	if year != "" {
+		idx := strings.LastIndex(name, year)
+		if idx != -1 {
+			name = strings.TrimSpace(name[:idx])
+		}
+	}
 
 	// Strip release group info (handles dots, resolution, codecs, etc.)
 	name = StripReleaseGroup(name)
