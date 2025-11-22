@@ -138,12 +138,15 @@ func checkMovieCompliance(filePath, libRoot string) *ComplianceIssue {
 			suggestedDir := filepath.Join(filepath.Dir(filepath.Dir(filePath)), cleanName)
 			suggestedPath := filepath.Join(suggestedDir, cleanName+filepath.Ext(filePath))
 
-			return &ComplianceIssue{
-				Path:            filePath,
-				Type:            "movie",
-				Problem:         "Folder name doesn't match filename",
-				SuggestedPath:   suggestedPath,
-				SuggestedAction: "reorganize",
+			// Only suggest a change if filename does not already match that parent dir's cleaned name
+			if CleanMovieName(filenameNoExt) != cleanName {
+				return &ComplianceIssue{
+					Path:            filePath,
+					Type:            "movie",
+					Problem:         "Folder name doesn't match filename",
+					SuggestedPath:   suggestedPath,
+					SuggestedAction: "reorganize",
+				}
 			}
 		}
 		// Check if both follow pattern but just don't match

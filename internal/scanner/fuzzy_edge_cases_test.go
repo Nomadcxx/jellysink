@@ -58,7 +58,7 @@ func TestReleaseGroupRemoval(t *testing.T) {
 		{
 			name:     "Thelma O Unicornio",
 			input:    "Thelma.O.Unicornio.2024.1080p.NF.WEB-DL.DDP5.1.Atmos.x264.DUAL-CBR.mkv",
-			expected: "Thelma The Unicorn (2024)",
+			expected: "Thelma O Unicornio (2024)",
 		},
 	}
 
@@ -69,5 +69,21 @@ func TestReleaseGroupRemoval(t *testing.T) {
 				t.Errorf("\nInput:    %s\nExpected: %s\nGot:      %s", tt.input, tt.expected, result)
 			}
 		})
+	}
+
+	// Additional compliance tests for parent folder precedence
+	// Thelma - parent folder is 'Thelma the Unicorn (2024)', the filename is Spanish; expect compliance to prefer parent folder
+	{
+		name := "Thelma parent precedence"
+		lib := "/tmp/test_jellysink_lib/MOVIES"
+		filePath := lib + "/Thelma the Unicorn (2024)/Thelma.O.Unicornio.2024.1080p.NF.WEB-DL.DDP5.1.Atmos.x264.DUAL-CBR.mkv"
+		issue := checkMovieCompliance(filePath, lib)
+		if issue == nil {
+			t.Fatalf("%s: expected compliance issue for %s, got nil", name, filePath)
+		}
+		expected := lib + "/Thelma The Unicorn (2024)/Thelma The Unicorn (2024).mkv"
+		if issue.SuggestedPath != expected {
+			t.Fatalf("%s: expected suggested path %s, got %s", name, expected, issue.SuggestedPath)
+		}
 	}
 }

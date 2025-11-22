@@ -52,7 +52,7 @@ func init() {
 		`\b(Stereo|Mono)\b`,
 		// Commentary markers
 		`\b(Plus Commentary|Commentary|Audio Commentary)\b`,
-		`\b(Plus|Extended Commentary)\b`,
+		`\bExtended Commentary\b`,
 		// Locale tags (e.g., NORDiC)
 		`\b(NORDiC|NF|ATVP|HULU)\b`,
 
@@ -384,79 +384,59 @@ func min(a, b, c int) int {
 func stripOrphanedReleaseGroups(name string) string {
 	// Common release group patterns (exact matches only, case-insensitive)
 	knownGroups := map[string]bool{
-		"rarbg": true, "yts": true, "yify": true, "etrg": true, "fgt": true, "mkvCage": true,
+		"rarbg": true, "yts": true, "yify": true, "etrg": true, "fgt": true, "mkvcage": true,
 		"stuttershit": true, "sparks": true, "rovers": true, "phoenix": true, "cmrg": true,
 		"evo": true, "ion10": true, "psa": true, "afg": true, "sampa": true, "tgx": true, "snake": true,
 		"d3fil3r": true, "fistworld": true, "crys": true, "handjob": true, "rightsize": true,
 		"ntb": true, "ntg": true, "getit": true, "pignus": true, "btn": true, "don": true, "ctrlhd": true,
-		"mag": true, "psychd": true, "ml": true, "mirc": true, "mircrow": true, "chamele0n": true, "cinemix": true, "mircrew": true,
+		"mag": true, "psychd": true, "ml": true, "mirc": true, "mircrew": true, "chameleon": true, "cinemix": true,
 		"will1869": true, "aspide": true, "nueng": true,
 	}
 
 	words := strings.Fields(name)
-	// Remove all known groups from anywhere in the name
-	filtered := make([]string, 0, len(words))
-	for _, w := range words {
-		if _, ok := knownGroups[strings.ToLower(w)]; !ok {
-			filtered = append(filtered, w)
-		}
-	}
 
-	// Update name and words
-	name = strings.Join(filtered, " ")
-	words = filtered
-
-	// Now iteratively remove release-like trailing tokens
+	// Only remove known groups from the tail. This avoids stripping title words in the middle.
 	for len(words) > 0 {
 		last := words[len(words)-1]
 		lastLower := strings.ToLower(last)
 
-		// Skip common English words that might be legitimate titles
-		exceptionPrefix := []string{"the", "a", "an", "of", "and", "in", "on"}
-		isException := false
-		for _, ex := range exceptionPrefix {
-			if strings.HasPrefix(lastLower, ex+" ") || lastLower == ex {
-				isException = true
-				break
-			}
-		}
-		if isException {
-			break
+		// If the last word is in the known groups, remove it
+		if _, ok := knownGroups[lastLower]; ok {
+			words = words[:len(words)-1]
+			continue
 		}
 
-		// Heuristics: remove last token if it's likely a release group
-		if len(last) >= 2 && len(last) <= 15 {
-			hasDigit := false
-			hasLetter := false
-			hasLower := false
-			hasUpper := false
-			for _, ch := range last {
-				if ch >= '0' && ch <= '9' {
-					hasDigit = true
-				} else if ch >= 'a' && ch <= 'z' {
-					hasLetter = true
-					hasLower = true
-				} else if ch >= 'A' && ch <= 'Z' {
-					hasLetter = true
-					hasUpper = true
-				}
-			}
-
-			// Remove if has letters and digits or if it is weirdly cased (release group style)
-			if hasLetter && hasDigit {
-				words = words[:len(words)-1]
-				continue
-			}
-			if hasUpper && !hasLower && len(last) >= 3 {
-				words = words[:len(words)-1]
-				continue
-			}
-			// Also remove if last token is short upper case like RARBG or CBR
-			if hasUpper && len(last) <= 4 {
-				words = words[:len(words)-1]
-				continue
+		// Heuristics: remove if the last token looks like a release group (digits+letters or ALL CAPS)
+		hasDigit := false
+		hasLetter := false
+		hasLower := false
+		hasUpper := false
+		for _, ch := range last {
+			if ch >= '0' && ch <= '9' {
+				hasDigit = true
+			} else if ch >= 'a' && ch <= 'z' {
+				hasLetter = true
+				hasLower = true
+			} else if ch >= 'A' && ch <= 'Z' {
+				hasLetter = true
+				hasUpper = true
 			}
 		}
+
+		// Language tags like ITA, Fre, ENG, etc.
+		langTags := map[string]bool{"ita": true, "ita.": true, "fre": true, "fra": true, "eng": true, "en": true, "esp": true, "spa": true}
+		if langTags[lastLower] {
+			words = words[:len(words)-1]
+			continue
+		}
+
+		// Remove if last token is short uppercase or contains letter+digit mix
+		if (hasUpper && !hasLower && len(last) <= 4) || (hasLetter && hasDigit) {
+			words = words[:len(words)-1]
+			continue
+		}
+
+		// Stop removing any further tokens if the last word looks like a title word
 		break
 	}
 
@@ -484,7 +464,17 @@ func CleanMovieName(name string) string {
 	if year != "" {
 		idx := strings.LastIndex(name, year)
 		if idx != -1 {
-			name = strings.TrimSpace(name[:idx])
+			// Move index left to strip preceding punctuation like '(' '[' '.' '-' and whitespace
+			startIdx := idx
+			for startIdx > 0 {
+				ch := name[startIdx-1]
+				if ch == '(' || ch == '[' || ch == '.' || ch == ' ' || ch == '_' || ch == '-' {
+					startIdx--
+				} else {
+					break
+				}
+			}
+			name = strings.TrimSpace(name[:startIdx])
 		}
 	}
 
