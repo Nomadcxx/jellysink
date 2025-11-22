@@ -131,6 +131,21 @@ func checkMovieCompliance(filePath, libRoot string) *ComplianceIssue {
 	// Check if parent directory name matches filename (minus extension)
 	filenameNoExt := strings.TrimSuffix(filename, filepath.Ext(filename))
 	if parentDir != filenameNoExt {
+		// If parent dir is clean (has year in parentheses) prefer it as the source of truth
+		if hasYearInParentheses(parentDir) {
+			// Use parent dir as source of truth
+			cleanName := CleanMovieName(parentDir)
+			suggestedDir := filepath.Join(filepath.Dir(filepath.Dir(filePath)), cleanName)
+			suggestedPath := filepath.Join(suggestedDir, cleanName+filepath.Ext(filePath))
+
+			return &ComplianceIssue{
+				Path:            filePath,
+				Type:            "movie",
+				Problem:         "Folder name doesn't match filename",
+				SuggestedPath:   suggestedPath,
+				SuggestedAction: "reorganize",
+			}
+		}
 		// Check if both follow pattern but just don't match
 		if hasYear(parentDir) && hasYear(filenameNoExt) {
 			// Both have years but don't match - clean the filename to get the correct name
