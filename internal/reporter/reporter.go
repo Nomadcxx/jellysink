@@ -26,6 +26,7 @@ type Report struct {
 	MovieDuplicates    []scanner.MovieDuplicate
 	TVDuplicates       []scanner.TVDuplicate
 	ComplianceIssues   []scanner.ComplianceIssue
+	AmbiguousTVShows   []*scanner.TVTitleResolution // TV shows needing manual review
 	TotalDuplicates    int
 	TotalFilesToDelete int
 	SpaceToFree        int64
@@ -99,6 +100,12 @@ func GenerateDetailed(report Report) (ReportFiles, error) {
 
 // getReportDir returns the report directory path
 func getReportDir() string {
+	// If running with sudo, use the real user's home directory
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		home := "/home/" + sudoUser
+		return filepath.Join(home, ".local/share/jellysink/scan_results")
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "/tmp/jellysink/scan_results"
@@ -353,7 +360,19 @@ func buildSummaryReport(report Report) string {
 	// Compliance issues summary with examples
 	sb.WriteString("COMPLIANCE ISSUES\n")
 	sb.WriteString(strings.Repeat("-", 80) + "\n")
-	sb.WriteString(fmt.Sprintf("Files/folders to rename: %d\n\n", len(report.ComplianceIssues)))
+	sb.WriteString(fmt.Sprintf("Files/folders to rename: %d\n", len(report.ComplianceIssues)))
+
+	// Count manual intervention items (ambiguous but not API-verified)
+	manualInterventionCount := 0
+	for _, res := range report.AmbiguousTVShows {
+		if !res.APIVerified {
+			manualInterventionCount++
+		}
+	}
+	if manualInterventionCount > 0 {
+		sb.WriteString(fmt.Sprintf("Items needing manual review: %d\n", manualInterventionCount))
+	}
+	sb.WriteString("\n")
 
 	if len(report.ComplianceIssues) > 0 {
 		sb.WriteString(fmt.Sprintf("Examples (first %d):\n", MaxExampleOffenders))
@@ -375,6 +394,9 @@ func buildSummaryReport(report Report) string {
 	sb.WriteString(strings.Repeat("-", 80) + "\n")
 	sb.WriteString("  [F1] View full duplicate report (page up/down)\n")
 	sb.WriteString("  [F2] View full compliance report (page up/down)\n")
+	if manualInterventionCount > 0 {
+		sb.WriteString("  [F3] Manual intervention (rename ambiguous titles)\n")
+	}
 	sb.WriteString("  [Enter] Clean (delete duplicates + fix compliance)\n")
 	sb.WriteString("  [Esc] Skip cleaning\n")
 
@@ -422,20 +444,110 @@ func buildComplianceReport(report Report) string {
 	sb.WriteString(strings.Repeat("=", 80) + "\n")
 	sb.WriteString(fmt.Sprintf("Generated: %s\n\n", report.Timestamp.Format("2006-01-02 15:04:05")))
 
-	if len(report.ComplianceIssues) == 0 {
+	if len(report.ComplianceIssues) == 0 && len(report.AmbiguousTVShows) == 0 {
 		sb.WriteString("No compliance issues found. All files follow Jellyfin naming conventions.\n")
 		return sb.String()
 	}
 
-	sb.WriteString("NON-COMPLIANT FILES AND FOLDERS\n")
-	sb.WriteString(strings.Repeat("=", 80) + "\n")
-	sb.WriteString(fmt.Sprintf("Total issues: %d\n\n", len(report.ComplianceIssues)))
+	// Separate ambiguous shows into API-verified and manual intervention needed
+	var apiVerified []*scanner.TVTitleResolution
+	var needsManualIntervention []*scanner.TVTitleResolution
 
-	for i, issue := range report.ComplianceIssues {
-		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.ToUpper(issue.Type), issue.Problem))
-		sb.WriteString(fmt.Sprintf("   Current:  %s\n", issue.Path))
-		sb.WriteString(fmt.Sprintf("   Fixed:    %s\n", issue.SuggestedPath))
-		sb.WriteString(fmt.Sprintf("   Action:   %s\n\n", issue.SuggestedAction))
+	for _, res := range report.AmbiguousTVShows {
+		if res.APIVerified {
+			apiVerified = append(apiVerified, res)
+		} else {
+			needsManualIntervention = append(needsManualIntervention, res)
+		}
+	}
+
+	// Manual Intervention Section (unresolved conflicts)
+	if len(needsManualIntervention) > 0 {
+		sb.WriteString("WHAT I COULDN'T FIX\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("Total items requiring manual review: %d\n\n", len(needsManualIntervention)))
+		sb.WriteString("These items could not be automatically resolved. Possible reasons:\n")
+		sb.WriteString("  - TVDB API key not configured\n")
+		sb.WriteString("  - API returned different series for folder vs filename\n")
+		sb.WriteString("  - Network error prevented API lookup\n")
+		sb.WriteString("  - Both titles returned no results\n\n")
+		sb.WriteString("Press F3 to open the manual intervention page where you can rename these files.\n\n")
+
+		seenShows := make(map[string]bool)
+		for i, res := range needsManualIntervention {
+			key := res.FolderMatch.Title + "|" + res.FilenameMatch.Title
+			if seenShows[key] {
+				continue
+			}
+			seenShows[key] = true
+
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, res.ResolvedTitle))
+			sb.WriteString(fmt.Sprintf("   Folder:   %s", res.FolderMatch.Title))
+			if res.FolderMatch.Year != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", res.FolderMatch.Year))
+			}
+			sb.WriteString(fmt.Sprintf(" [confidence: %.2f]\n", res.FolderMatch.Confidence))
+
+			sb.WriteString(fmt.Sprintf("   Filename: %s", res.FilenameMatch.Title))
+			if res.FilenameMatch.Year != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", res.FilenameMatch.Year))
+			}
+			sb.WriteString(fmt.Sprintf(" [confidence: %.2f]\n", res.FilenameMatch.Confidence))
+
+			sb.WriteString(fmt.Sprintf("   Issue:    %s\n\n", res.Reason))
+		}
+
+		sb.WriteString("\n")
+	}
+
+	// API Verified but Ambiguous Section (auto-resolved with low confidence)
+	if len(apiVerified) > 0 {
+		sb.WriteString("TV SHOWS AUTO-RESOLVED BY API\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("Total shows auto-resolved: %d\n\n", len(apiVerified)))
+		sb.WriteString("These shows had conflicting titles but were resolved using TVDB API.\n")
+		sb.WriteString("Review these to ensure the resolved title is correct.\n\n")
+
+		seenShows := make(map[string]bool)
+		for i, res := range apiVerified {
+			key := res.FolderMatch.Title + "|" + res.FilenameMatch.Title
+			if seenShows[key] {
+				continue
+			}
+			seenShows[key] = true
+
+			sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, res.ResolvedTitle))
+			sb.WriteString(fmt.Sprintf("   Folder:   %s", res.FolderMatch.Title))
+			if res.FolderMatch.Year != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", res.FolderMatch.Year))
+			}
+			sb.WriteString("\n")
+
+			sb.WriteString(fmt.Sprintf("   Filename: %s", res.FilenameMatch.Title))
+			if res.FilenameMatch.Year != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", res.FilenameMatch.Year))
+			}
+			sb.WriteString("\n")
+
+			sb.WriteString(fmt.Sprintf("   Resolved: %s [confidence: %.2f]\n", res.ResolvedTitle, res.Confidence))
+			sb.WriteString(fmt.Sprintf("   Reason:   %s\n\n", res.Reason))
+		}
+
+		sb.WriteString("\n")
+	}
+
+	// Standard Compliance Issues Section
+	if len(report.ComplianceIssues) > 0 {
+		sb.WriteString("NON-COMPLIANT FILES AND FOLDERS\n")
+		sb.WriteString(strings.Repeat("=", 80) + "\n")
+		sb.WriteString(fmt.Sprintf("Total issues: %d\n\n", len(report.ComplianceIssues)))
+
+		for i, issue := range report.ComplianceIssues {
+			sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, strings.ToUpper(issue.Type), issue.Problem))
+			sb.WriteString(fmt.Sprintf("   Current:  %s\n", issue.Path))
+			sb.WriteString(fmt.Sprintf("   Fixed:    %s\n", issue.SuggestedPath))
+			sb.WriteString(fmt.Sprintf("   Action:   %s\n\n", issue.SuggestedAction))
+		}
 	}
 
 	return sb.String()

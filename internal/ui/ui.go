@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -18,24 +19,36 @@ const (
 	ViewSummary ViewMode = iota
 	ViewDuplicates
 	ViewCompliance
+	ViewManualIntervention
 )
 
 // Model represents the TUI state
 type Model struct {
-	report      reporter.Report
-	mode        ViewMode
-	viewport    viewport.Model
-	ready       bool
-	width       int
-	height      int
-	shouldClean bool // Set to true when user presses Enter to clean
+	report                 reporter.Report
+	mode                   ViewMode
+	viewport               viewport.Model
+	ready                  bool
+	width                  int
+	height                 int
+	shouldClean            bool
+	selectedAmbiguousIndex int
+	editingTitle           bool
+	titleInput             textinput.Model
+	editedTitles           map[int]string
 }
 
 // NewModel creates a new TUI model with a scan report
 func NewModel(report reporter.Report) Model {
+	ti := textinput.New()
+	ti.Placeholder = "Enter correct title..."
+	ti.CharLimit = 200
+	ti.Width = 60
+
 	return Model{
-		report: report,
-		mode:   ViewSummary,
+		report:       report,
+		mode:         ViewSummary,
+		titleInput:   ti,
+		editedTitles: make(map[int]string),
 	}
 }
 
@@ -48,36 +61,109 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.editingTitle {
+			switch msg.String() {
+			case "esc":
+				m.editingTitle = false
+				m.titleInput.Blur()
+				m.viewport.SetContent(m.renderManualIntervention())
+				return m, nil
+
+			case "enter":
+				value := strings.TrimSpace(m.titleInput.Value())
+				if value != "" {
+					m.editedTitles[m.selectedAmbiguousIndex] = value
+					m.editingTitle = false
+					m.titleInput.Blur()
+					m.titleInput.SetValue("")
+					m.viewport.SetContent(m.renderManualIntervention())
+				}
+				return m, nil
+
+			default:
+				var cmd tea.Cmd
+				m.titleInput, cmd = m.titleInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
 		case "esc":
-			// Return to summary from detail views
 			if m.mode != ViewSummary {
 				m.mode = ViewSummary
 				m.viewport.SetContent(m.renderSummary())
 				return m, nil
 			}
-			// Exit from summary
 			return m, tea.Quit
 
 		case "f1":
-			// Switch to duplicates view
 			m.mode = ViewDuplicates
 			m.viewport.SetContent(m.renderDuplicates())
 			m.viewport.GotoTop()
 			return m, nil
 
 		case "f2":
-			// Switch to compliance view
 			m.mode = ViewCompliance
 			m.viewport.SetContent(m.renderCompliance())
 			m.viewport.GotoTop()
 			return m, nil
 
+		case "f3":
+			if len(m.report.AmbiguousTVShows) > 0 {
+				m.mode = ViewManualIntervention
+				m.viewport.SetContent(m.renderManualIntervention())
+				m.viewport.GotoTop()
+			}
+			return m, nil
+
+		case "up", "k":
+			if m.mode == ViewManualIntervention && !m.editingTitle {
+				if m.selectedAmbiguousIndex > 0 {
+					m.selectedAmbiguousIndex--
+					m.viewport.SetContent(m.renderManualIntervention())
+				}
+			}
+			return m, nil
+
+		case "down", "j":
+			if m.mode == ViewManualIntervention && !m.editingTitle {
+				if m.selectedAmbiguousIndex < len(m.report.AmbiguousTVShows)-1 {
+					m.selectedAmbiguousIndex++
+					m.viewport.SetContent(m.renderManualIntervention())
+				}
+			}
+			return m, nil
+
+		case "e":
+			if m.mode == ViewManualIntervention && !m.editingTitle {
+				m.editingTitle = true
+				resolution := m.report.AmbiguousTVShows[m.selectedAmbiguousIndex]
+				if editedTitle, exists := m.editedTitles[m.selectedAmbiguousIndex]; exists {
+					m.titleInput.SetValue(editedTitle)
+				} else if resolution.ResolvedTitle != "" {
+					m.titleInput.SetValue(resolution.ResolvedTitle)
+				} else if resolution.FolderMatch != nil {
+					m.titleInput.SetValue(resolution.FolderMatch.Title)
+				} else if resolution.FilenameMatch != nil {
+					m.titleInput.SetValue(resolution.FilenameMatch.Title)
+				}
+				m.titleInput.Focus()
+				m.viewport.SetContent(m.renderManualIntervention())
+				return m, textinput.Blink
+			}
+			return m, nil
+
 		case "enter":
-			// Mark that user wants to clean and exit
+			if m.mode == ViewManualIntervention && !m.editingTitle {
+				if len(m.editedTitles) > 0 {
+					m.shouldClean = true
+					return m, tea.Quit
+				}
+				return m, nil
+			}
 			m.shouldClean = true
 			return m, tea.Quit
 		}
@@ -117,12 +203,21 @@ func (m Model) View() string {
 	switch m.mode {
 	case ViewSummary:
 		header = FormatHeader("JELLYSINK SCAN SUMMARY")
-		footer = FormatFooter(
-			FormatKeybinding("F1", "Duplicates"),
-			FormatKeybinding("F2", "Compliance"),
-			FormatKeybinding("Enter", "Clean"),
-			FormatKeybinding("Esc", "Exit"),
-		)
+		if len(m.report.AmbiguousTVShows) > 0 {
+			footer = FormatFooter(
+				FormatKeybinding("F1", "Duplicates"),
+				FormatKeybinding("F2", "Compliance"),
+				FormatKeybinding("F3", "Manual Fixes"),
+				FormatKeybinding("Esc", "Exit"),
+			)
+		} else {
+			footer = FormatFooter(
+				FormatKeybinding("F1", "Duplicates"),
+				FormatKeybinding("F2", "Compliance"),
+				FormatKeybinding("Enter", "Clean"),
+				FormatKeybinding("Esc", "Exit"),
+			)
+		}
 
 	case ViewDuplicates:
 		header = FormatHeader("DUPLICATE REPORT (DETAILED)")
@@ -142,6 +237,15 @@ func (m Model) View() string {
 			FormatKeybinding("PgUp/PgDn", "Page"),
 			FormatKeybinding("Esc", "Back"),
 			MutedStyle.Render(scrollInfo),
+		)
+
+	case ViewManualIntervention:
+		header = FormatHeader("MANUAL INTERVENTION REQUIRED")
+		footer = FormatFooter(
+			FormatKeybinding("↑↓", "Navigate"),
+			FormatKeybinding("E", "Edit Title"),
+			FormatKeybinding("Enter", "Apply Renames"),
+			FormatKeybinding("Esc", "Back"),
 		)
 	}
 
@@ -188,6 +292,14 @@ func (m Model) renderSummary() string {
 				StatStyle.Render(formatBytes(offenders[i].SpaceToFree))))
 		}
 		sb.WriteString("\n")
+	}
+
+	// Manual Intervention section (if ambiguous TV shows exist)
+	if len(m.report.AmbiguousTVShows) > 0 {
+		sb.WriteString(TitleStyle.Render("⚠ MANUAL INTERVENTION REQUIRED") + "\n")
+		sb.WriteString(ErrorStyle.Render(fmt.Sprintf("TV shows needing review: %d", len(m.report.AmbiguousTVShows))) + "\n")
+		sb.WriteString(WarningStyle.Render("These shows have conflicting titles that could not be auto-resolved.") + "\n")
+		sb.WriteString(InfoStyle.Render("Press F3 to review and fix these issues.") + "\n\n")
 	}
 
 	// Compliance section
@@ -322,6 +434,122 @@ func (m Model) renderCompliance() string {
 	return sb.String()
 }
 
+// renderManualIntervention renders the manual intervention view for ambiguous TV show titles
+func (m Model) renderManualIntervention() string {
+	var sb strings.Builder
+
+	sb.WriteString(TitleStyle.Render("TV SHOWS REQUIRING MANUAL REVIEW") + "\n\n")
+
+	if len(m.report.AmbiguousTVShows) == 0 {
+		sb.WriteString(SuccessStyle.Render("✓ No ambiguous TV show titles found") + "\n")
+		return sb.String()
+	}
+
+	sb.WriteString(InfoStyle.Render(fmt.Sprintf("Found %d TV show(s) with conflicting titles that need your review:", len(m.report.AmbiguousTVShows))) + "\n\n")
+
+	sb.WriteString(WarningStyle.Render("⚠ These shows have different titles in folder vs filename, and the API could not resolve them.") + "\n")
+	sb.WriteString(MutedStyle.Render("   Please review each one and choose the correct title manually.") + "\n\n")
+
+	for i, resolution := range m.report.AmbiguousTVShows {
+		isSelected := i == m.selectedAmbiguousIndex
+		prefix := "   "
+		if isSelected {
+			prefix = " → "
+		}
+
+		if isSelected {
+			sb.WriteString(HighlightStyle.Render(fmt.Sprintf("%s%d. CONFLICT DETECTED", prefix, i+1)) + "\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("%s%d. CONFLICT DETECTED\n", prefix, i+1))
+		}
+
+		if resolution.FolderMatch != nil {
+			sb.WriteString(fmt.Sprintf("%s   %s %s",
+				prefix,
+				InfoStyle.Render("Folder title:  "),
+				ContentStyle.Render(resolution.FolderMatch.Title)))
+			if resolution.FolderMatch.Year != "" {
+				sb.WriteString(MutedStyle.Render(fmt.Sprintf(" (%s)", resolution.FolderMatch.Year)))
+			}
+			sb.WriteString(fmt.Sprintf(" [confidence: %s]\n", StatStyle.Render(fmt.Sprintf("%.0f%%", resolution.FolderMatch.Confidence*100))))
+		}
+
+		if resolution.FilenameMatch != nil {
+			sb.WriteString(fmt.Sprintf("%s   %s %s",
+				prefix,
+				InfoStyle.Render("Filename title:"),
+				ContentStyle.Render(resolution.FilenameMatch.Title)))
+			if resolution.FilenameMatch.Year != "" {
+				sb.WriteString(MutedStyle.Render(fmt.Sprintf(" (%s)", resolution.FilenameMatch.Year)))
+			}
+			sb.WriteString(fmt.Sprintf(" [confidence: %s]\n", StatStyle.Render(fmt.Sprintf("%.0f%%", resolution.FilenameMatch.Confidence*100))))
+		}
+
+		sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+			prefix,
+			MutedStyle.Render("Reason:       "),
+			ErrorStyle.Render(resolution.Reason)))
+
+		if resolution.APIVerified {
+			sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+				prefix,
+				MutedStyle.Render("API says:     "),
+				WarningStyle.Render("API returned conflicting results")))
+		} else {
+			sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+				prefix,
+				MutedStyle.Render("API says:     "),
+				MutedStyle.Render("Could not verify (API key not configured or failed)")))
+		}
+
+		if isSelected && m.editingTitle {
+			sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+				prefix,
+				SuccessStyle.Render("Edit title:   "),
+				m.titleInput.View()))
+			sb.WriteString(fmt.Sprintf("%s   %s\n",
+				prefix,
+				MutedStyle.Render("              Press Enter to save, Esc to cancel")))
+		} else {
+			editedTitle, hasEdit := m.editedTitles[i]
+			if hasEdit {
+				sb.WriteString(fmt.Sprintf("%s   %s %s %s\n",
+					prefix,
+					SuccessStyle.Render("Edited to:    "),
+					HighlightStyle.Render(editedTitle),
+					SuccessStyle.Render("✓")))
+			} else if resolution.ResolvedTitle != "" {
+				sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+					prefix,
+					InfoStyle.Render("Current:      "),
+					ContentStyle.Render(resolution.ResolvedTitle)))
+			} else {
+				sb.WriteString(fmt.Sprintf("%s   %s %s\n",
+					prefix,
+					ErrorStyle.Render("Action needed:"),
+					WarningStyle.Render("Press E to edit")))
+			}
+		}
+
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(MutedStyle.Render("───────────────────────────────────────────────────────────────────────────────") + "\n\n")
+	sb.WriteString(InfoStyle.Render("What to do:") + "\n")
+	sb.WriteString("  1. Use ↑↓ to navigate between conflicts\n")
+	sb.WriteString("  2. Press 'E' to edit the selected title\n")
+	sb.WriteString("  3. Press 'Enter' to apply all renames\n")
+	sb.WriteString("  4. Press 'Esc' to go back without changes\n\n")
+
+	if len(m.editedTitles) > 0 {
+		sb.WriteString(SuccessStyle.Render(fmt.Sprintf("✓ %d title(s) edited and ready to apply", len(m.editedTitles))) + "\n")
+	}
+
+	sb.WriteString(WarningStyle.Render("Note: Renames will be applied to both folders and filenames for consistency.") + "\n")
+
+	return sb.String()
+}
+
 // Helper functions
 
 func formatBytes(bytes int64) string {
@@ -346,4 +574,9 @@ func getTopOffenders(report reporter.Report) []reporter.Offender {
 // ShouldClean returns whether the user requested a clean operation
 func (m Model) ShouldClean() bool {
 	return m.shouldClean
+}
+
+// GetEditedTitles returns the map of edited titles by ambiguous show index
+func (m Model) GetEditedTitles() map[int]string {
+	return m.editedTitles
 }

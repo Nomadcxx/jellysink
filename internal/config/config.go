@@ -12,6 +12,7 @@ import (
 type Config struct {
 	Libraries LibraryConfig `toml:"libraries"`
 	Daemon    DaemonConfig  `toml:"daemon"`
+	API       APIConfig     `toml:"api"`
 }
 
 // LibraryConfig defines media library paths
@@ -36,6 +37,24 @@ type DaemonConfig struct {
 	ReportOnComplete bool   `toml:"report_on_complete"` // launch TUI on scan complete
 }
 
+// APIConfig holds API keys for metadata services
+type APIConfig struct {
+	TVDB TVDBConfig `toml:"tvdb"`
+	OMDB OMDBConfig `toml:"omdb"`
+}
+
+// TVDBConfig holds TVDB API configuration
+type TVDBConfig struct {
+	APIKey  string `toml:"api_key"`
+	Enabled bool   `toml:"enabled"`
+}
+
+// OMDBConfig holds OMDB API configuration
+type OMDBConfig struct {
+	APIKey  string `toml:"api_key"`
+	Enabled bool   `toml:"enabled"`
+}
+
 // DefaultConfig returns a config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
@@ -51,14 +70,32 @@ func DefaultConfig() *Config {
 			ScanFrequency:    "weekly",
 			ReportOnComplete: true,
 		},
+		API: APIConfig{
+			TVDB: TVDBConfig{
+				APIKey:  "",
+				Enabled: false,
+			},
+			OMDB: OMDBConfig{
+				APIKey:  "",
+				Enabled: false,
+			},
+		},
 	}
 }
 
 // ConfigPath returns the path to the config file
 func ConfigPath() (string, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get config directory: %w", err)
+	var configDir string
+
+	// If running with sudo, use the real user's config directory
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		configDir = "/home/" + sudoUser + "/.config"
+	} else {
+		var err error
+		configDir, err = os.UserConfigDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get config directory: %w", err)
+		}
 	}
 
 	jellysinkDir := filepath.Join(configDir, "jellysink")

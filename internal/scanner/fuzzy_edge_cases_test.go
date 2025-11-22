@@ -60,6 +60,43 @@ func TestReleaseGroupRemoval(t *testing.T) {
 			input:    "Thelma.O.Unicornio.2024.1080p.NF.WEB-DL.DDP5.1.Atmos.x264.DUAL-CBR.mkv",
 			expected: "Thelma O Unicornio (2024)",
 		},
+		// Edge cases reported by user
+		{
+			name:     "8MM",
+			input:    "8MM.1999.720p.WEB-DL.DD5.1.H264-FGT-Obfuscated.cp(tt0134273).mkv",
+			expected: "8MM (1999)",
+		},
+		{
+			name:     "U.S. Marshals",
+			input:    "U.S.Marshals.1998.DVDRip.x264-DJ.mkv",
+			expected: "U.S. Marshals (1998)",
+		},
+		{
+			name:     "D.E.B.S.",
+			input:    "D.E.B.S..2004.1080p.x264.DTS-Relevant.mkv",
+			expected: "D.E.B.S. (2004)",
+		},
+		{
+			name:     "R.I.P.D. 2",
+			input:    "R.I.P.D.2.Rise.of.the.Damned.2022.BluRay.720p.DTS.x264-MTeam.mkv",
+			expected: "R.I.P.D. 2 Rise Of The Damned (2022)",
+		},
+		{
+			name:     "Le Comte de Monte-Cristo",
+			input:    "Le.Comte.de.Monte-Cristo.2024.1080p.WEB.H264-GP-M-NLsubs.mkv",
+			expected: "Le Comte De Monte-Cristo (2024)",
+		},
+		// Edge cases from user compliance report
+		{
+			name:     "Trolls with SPARKS release group",
+			input:    "Trolls.2016.720p.BluRay.x264-SPARKS.mkv",
+			expected: "Trolls (2016)",
+		},
+		{
+			name:     "The Invitation with Unrated edition marker",
+			input:    "The Invitation-Unrated (2022)",
+			expected: "The Invitation (2022)",
+		},
 	}
 
 	for _, tt := range tests {

@@ -49,6 +49,7 @@ func NewMenuModel(cfg *config.Config) MenuModel {
 		MenuItem{title: "Configure Frequency", desc: "Set automatic scan frequency (daily/weekly/biweekly)"},
 		MenuItem{title: "Enable/Disable Daemon", desc: "Toggle automatic background scanning"},
 		MenuItem{title: "Configure Libraries", desc: "Add or remove media library paths"},
+		MenuItem{title: "Configure API Keys", desc: "Set TVDB/OMDB API keys for metadata resolution"},
 		MenuItem{title: "Exit", desc: "Quit jellysink"},
 	}
 
@@ -66,9 +67,12 @@ func NewMenuModel(cfg *config.Config) MenuModel {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(RAMAMuted)
 
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, delegate, 80, 20)
 	l.Title = "JELLYSINK MAIN MENU"
 	l.Styles.Title = TitleStyle
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -192,6 +196,12 @@ func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 		libModel.list.SetSize(m.width-4, listHeight)
 		return libModel, nil
 
+	case "Configure API Keys":
+		apiModel := NewAPIConfigModel(m.config)
+		apiModel.width = m.width
+		apiModel.height = m.height
+		return apiModel, apiModel.Init()
+
 	case "Exit":
 		m.cancel()
 		return m, tea.Quit
@@ -202,8 +212,54 @@ func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 
 // viewLastReport finds and displays the most recent report
 func (m MenuModel) viewLastReport() tea.Msg {
-	// TODO: Implement finding last report
-	return nil
+	// Find most recent JSON report
+	var scanResultsPath string
+
+	// If running with sudo, use the real user's home directory
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		scanResultsPath = "/home/" + sudoUser + "/.local/share/jellysink/scan_results"
+	} else {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return scanStatusMsg{err: fmt.Errorf("failed to get home directory: %w", err)}
+		}
+		scanResultsPath = homeDir + "/.local/share/jellysink/scan_results"
+	}
+
+	// List all JSON files
+	files, err := os.ReadDir(scanResultsPath)
+	if err != nil {
+		return scanStatusMsg{err: fmt.Errorf("failed to read scan results directory: %w", err)}
+	}
+
+	// Filter for JSON files and find most recent
+	var mostRecent string
+	var mostRecentTime time.Time
+
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		info, err := file.Info()
+		if err != nil {
+			continue
+		}
+
+		if mostRecent == "" || info.ModTime().After(mostRecentTime) {
+			mostRecent = file.Name()
+			mostRecentTime = info.ModTime()
+		}
+	}
+
+	if mostRecent == "" {
+		return scanStatusMsg{err: fmt.Errorf("no scan reports found in %s", scanResultsPath)}
+	}
+
+	reportPath := scanResultsPath + "/" + mostRecent
+
+	// Load and return as scanStatusMsg to trigger report view
+	return scanStatusMsg{reportPath: reportPath, err: nil}
 }
 
 // loadReportJSON loads a report from a JSON file
@@ -347,9 +403,12 @@ func NewFrequencyMenuModel(cfg *config.Config) FrequencyMenuModel {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(RAMAMuted)
 
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, delegate, 80, 20)
 	l.Title = "SET SCAN FREQUENCY"
 	l.Styles.Title = TitleStyle
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
 
 	return FrequencyMenuModel{
 		list:   l,
@@ -463,9 +522,12 @@ func NewDaemonMenuModel(cfg *config.Config) DaemonMenuModel {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(RAMAMuted)
 
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, delegate, 80, 20)
 	l.Title = "DAEMON MANAGEMENT"
 	l.Styles.Title = TitleStyle
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
 
 	return DaemonMenuModel{
 		list:   l,
@@ -620,11 +682,12 @@ func NewLibraryMenuModel(cfg *config.Config) LibraryMenuModel {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(RAMAMuted)
 
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, delegate, 80, 20)
 	l.Title = "LIBRARY CONFIGURATION"
 	l.Styles.Title = TitleStyle
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
 
 	return LibraryMenuModel{
 		list:   l,
@@ -1049,10 +1112,12 @@ func NewRemovePathModel(cfg *config.Config) RemovePathModel {
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(RAMAMuted)
 
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, delegate, 80, 20)
 	l.Title = "Select Library Path to Remove"
+	l.Styles.Title = TitleStyle
 	l.SetShowHelp(false)
 	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
 
 	return RemovePathModel{
 		list:   l,
@@ -1500,6 +1565,414 @@ func (m ScanningModel) View() string {
 	content.WriteString(MutedStyle.Render("Press Ctrl+C to cancel") + "\n")
 
 	// Wrap in centered style
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// APIConfigModel handles API key configuration
+type APIConfigModel struct {
+	list   list.Model
+	config *config.Config
+	width  int
+	height int
+}
+
+// NewAPIConfigModel creates API key configuration menu
+func NewAPIConfigModel(cfg *config.Config) APIConfigModel {
+	items := []list.Item{
+		MenuItem{title: "Configure TVDB API", desc: "Set TVDB API key for TV show metadata verification"},
+		MenuItem{title: "Configure OMDB API", desc: "Set OMDB API key for movie metadata verification"},
+		MenuItem{title: "View API Status", desc: "Check configured API keys and their status"},
+		MenuItem{title: "Back", desc: "Return to main menu"},
+	}
+
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMARed).
+		Bold(true)
+	delegate.Styles.SelectedDesc = lipgloss.NewStyle().
+		Foreground(RAMABackground).
+		Background(RAMAFireRed)
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(RAMAForeground)
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(RAMAMuted)
+
+	l := list.New(items, delegate, 80, 20)
+	l.Title = "API CONFIGURATION"
+	l.Styles.Title = TitleStyle
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowTitle(true)
+
+	return APIConfigModel{
+		list:   l,
+		config: cfg,
+	}
+}
+
+func (m APIConfigModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m APIConfigModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			return NewMenuModel(m.config), nil
+
+		case "enter":
+			selected := m.list.SelectedItem().(MenuItem)
+			switch selected.title {
+			case "Back":
+				return NewMenuModel(m.config), nil
+			case "Configure TVDB API":
+				tvdbModel := NewSetAPIKeyModel(m.config, "tvdb")
+				tvdbModel.width = m.width
+				tvdbModel.height = m.height
+				return tvdbModel, tvdbModel.Init()
+			case "Configure OMDB API":
+				omdbModel := NewSetAPIKeyModel(m.config, "omdb")
+				omdbModel.width = m.width
+				omdbModel.height = m.height
+				return omdbModel, omdbModel.Init()
+			case "View API Status":
+				statusModel := NewAPIStatusModel(m.config)
+				statusModel.width = m.width
+				statusModel.height = m.height
+				return statusModel, nil
+			default:
+				return m, nil
+			}
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		listHeight := msg.Height - 16
+		if listHeight < 8 {
+			listHeight = 8
+		}
+		m.list.SetSize(msg.Width-4, listHeight)
+	}
+
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m APIConfigModel) View() string {
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+	content.WriteString(m.list.View())
+	content.WriteString("\n\n")
+
+	footer := MutedStyle.Render("↑/↓: Navigate  •  Enter: Select  •  Esc: Back  •  Q/Ctrl+C: Quit")
+	content.WriteString(footer)
+
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// SetAPIKeyModel handles setting an API key
+type SetAPIKeyModel struct {
+	textInput textinput.Model
+	config    *config.Config
+	apiType   string // "tvdb" or "omdb"
+	width     int
+	height    int
+	err       string
+	success   string
+}
+
+// NewSetAPIKeyModel creates a new API key input model
+func NewSetAPIKeyModel(cfg *config.Config, apiType string) SetAPIKeyModel {
+	ti := textinput.New()
+	ti.Placeholder = "Paste your API key here"
+	ti.Focus()
+	ti.CharLimit = 200
+	ti.Width = 60
+	ti.EchoMode = textinput.EchoPassword
+	ti.EchoCharacter = '•'
+
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(RAMARed)
+	ti.TextStyle = lipgloss.NewStyle().Foreground(RAMAForeground)
+	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(RAMAMuted)
+
+	return SetAPIKeyModel{
+		textInput: ti,
+		config:    cfg,
+		apiType:   apiType,
+	}
+}
+
+func (m SetAPIKeyModel) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m SetAPIKeyModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q":
+			return NewAPIConfigModel(m.config), nil
+
+		case "esc":
+			return NewAPIConfigModel(m.config), nil
+
+		case "ctrl+u":
+			m.textInput.SetValue("")
+			return m, nil
+
+		case "ctrl+v":
+			if m.textInput.EchoMode == textinput.EchoPassword {
+				m.textInput.EchoMode = textinput.EchoNormal
+			} else {
+				m.textInput.EchoMode = textinput.EchoPassword
+			}
+			return m, nil
+
+		case "enter":
+			apiKey := strings.TrimSpace(m.textInput.Value())
+			if apiKey == "" {
+				m.err = "API key cannot be empty"
+				m.success = ""
+				return m, nil
+			}
+
+			if m.apiType == "tvdb" {
+				m.config.API.TVDB.APIKey = apiKey
+				m.config.API.TVDB.Enabled = true
+			} else if m.apiType == "omdb" {
+				m.config.API.OMDB.APIKey = apiKey
+				m.config.API.OMDB.Enabled = true
+			}
+
+			if err := config.Save(m.config); err != nil {
+				m.err = fmt.Sprintf("Failed to save config: %v", err)
+				m.success = ""
+				return m, nil
+			}
+
+			m.success = fmt.Sprintf("%s API key saved successfully", strings.ToUpper(m.apiType))
+			m.err = ""
+			m.textInput.SetValue("")
+			return m, nil
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	m.textInput, cmd = m.textInput.Update(msg)
+	return m, cmd
+}
+
+func (m SetAPIKeyModel) View() string {
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	apiName := strings.ToUpper(m.apiType)
+	title := fmt.Sprintf("CONFIGURE %s API KEY", apiName)
+	content.WriteString(TitleStyle.Render(title) + "\n\n")
+
+	content.WriteString(InfoStyle.Render(fmt.Sprintf("%s API Key Configuration", apiName)) + "\n\n")
+
+	var guidance strings.Builder
+	if m.apiType == "tvdb" {
+		guidance.WriteString("TVDB (TheTVDB) provides TV show metadata for title verification.\n")
+		guidance.WriteString("Get your free API key at: https://thetvdb.com/api-information\n\n")
+		guidance.WriteString("Steps:\n")
+		guidance.WriteString("  1. Create a free account at TheTVDB\n")
+		guidance.WriteString("  2. Navigate to 'API Keys' in your dashboard\n")
+		guidance.WriteString("  3. Generate a new API key (v4)\n")
+		guidance.WriteString("  4. Copy and paste it below\n")
+	} else {
+		guidance.WriteString("OMDB (Open Movie Database) provides movie metadata for title verification.\n")
+		guidance.WriteString("Get your free API key at: https://www.omdbapi.com/apikey.aspx\n\n")
+		guidance.WriteString("Steps:\n")
+		guidance.WriteString("  1. Submit your email for a FREE key\n")
+		guidance.WriteString("  2. Check your email and activate the key\n")
+		guidance.WriteString("  3. Copy and paste it below\n")
+	}
+	content.WriteString(MutedStyle.Render(guidance.String()))
+	content.WriteString("\n")
+
+	var currentKey string
+	if m.apiType == "tvdb" {
+		if m.config.API.TVDB.APIKey != "" {
+			currentKey = "***" + m.config.API.TVDB.APIKey[len(m.config.API.TVDB.APIKey)-4:]
+		}
+	} else {
+		if m.config.API.OMDB.APIKey != "" {
+			currentKey = "***" + m.config.API.OMDB.APIKey[len(m.config.API.OMDB.APIKey)-4:]
+		}
+	}
+
+	if currentKey != "" {
+		content.WriteString(InfoStyle.Render("Current key: ") + MutedStyle.Render(currentKey) + "\n")
+	}
+
+	content.WriteString("Enter API Key: ")
+	content.WriteString(m.textInput.View())
+	content.WriteString("\n\n")
+
+	if m.err != "" {
+		content.WriteString(ErrorStyle.Render("✗ "+m.err) + "\n\n")
+	}
+
+	if m.success != "" {
+		content.WriteString(SuccessStyle.Render("✓ "+m.success) + "\n\n")
+	}
+
+	content.WriteString(MutedStyle.Render("Ctrl+V: Toggle visibility  •  Ctrl+U: Clear  •  Enter: Save  •  Esc: Cancel"))
+
+	mainStyle := lipgloss.NewStyle().
+		Padding(1, 2).
+		Width(m.width - 4)
+
+	return mainStyle.Render(content.String())
+}
+
+// APIStatusModel shows API configuration status
+type APIStatusModel struct {
+	config *config.Config
+	width  int
+	height int
+}
+
+// NewAPIStatusModel creates API status view
+func NewAPIStatusModel(cfg *config.Config) APIStatusModel {
+	return APIStatusModel{
+		config: cfg,
+	}
+}
+
+func (m APIStatusModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m APIStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "q", "esc":
+			return NewAPIConfigModel(m.config), nil
+		}
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	}
+
+	return m, nil
+}
+
+func (m APIStatusModel) View() string {
+	const minWidth = 100
+	const minHeight = 25
+
+	if m.width > 0 && m.height > 0 && (m.width < minWidth || m.height < minHeight) {
+		warningStyle := lipgloss.NewStyle().
+			Foreground(ColorWarning).
+			Bold(true).
+			Align(lipgloss.Center, lipgloss.Center).
+			Width(m.width).
+			Height(m.height)
+
+		warning := fmt.Sprintf(
+			"Terminal too small!\n\nMinimum: %dx%d\nCurrent: %dx%d\n\nPlease resize your terminal.",
+			minWidth, minHeight, m.width, m.height,
+		)
+		return warningStyle.Render(warning)
+	}
+
+	var content strings.Builder
+
+	content.WriteString(FormatASCIIHeader())
+	content.WriteString("\n\n")
+
+	content.WriteString(TitleStyle.Render("API CONFIGURATION STATUS") + "\n\n")
+
+	content.WriteString(InfoStyle.Render("TVDB (TheTVDB) API:") + "\n")
+	if m.config.API.TVDB.Enabled && m.config.API.TVDB.APIKey != "" {
+		maskedKey := "***" + m.config.API.TVDB.APIKey[len(m.config.API.TVDB.APIKey)-4:]
+		content.WriteString("  " + FormatStatusOK("Configured") + " - Key: " + MutedStyle.Render(maskedKey) + "\n")
+		content.WriteString("  Used for: TV show title verification and metadata resolution\n")
+	} else {
+		content.WriteString("  " + FormatStatusInfo("Not configured") + "\n")
+		content.WriteString("  Get your key at: https://thetvdb.com/api-information\n")
+	}
+	content.WriteString("\n")
+
+	content.WriteString(InfoStyle.Render("OMDB (Open Movie Database) API:") + "\n")
+	if m.config.API.OMDB.Enabled && m.config.API.OMDB.APIKey != "" {
+		maskedKey := "***" + m.config.API.OMDB.APIKey[len(m.config.API.OMDB.APIKey)-4:]
+		content.WriteString("  " + FormatStatusOK("Configured") + " - Key: " + MutedStyle.Render(maskedKey) + "\n")
+		content.WriteString("  Used for: Movie metadata verification (optional)\n")
+	} else {
+		content.WriteString("  " + FormatStatusInfo("Not configured") + "\n")
+		content.WriteString("  Get your key at: https://www.omdbapi.com/apikey.aspx\n")
+	}
+	content.WriteString("\n")
+
+	var notes strings.Builder
+	notes.WriteString("Note: API keys are optional but recommended for TV show title resolution.\n")
+	notes.WriteString("Without API keys, jellysink will use local heuristics for title matching.\n\n")
+	content.WriteString(MutedStyle.Render(notes.String()))
+
+	content.WriteString(MutedStyle.Render("Press Esc to return"))
+
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
 		Width(m.width - 4)

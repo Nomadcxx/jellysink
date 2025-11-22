@@ -253,3 +253,31 @@ func TestScanTVShows_NoEpisodePattern(t *testing.T) {
 		t.Errorf("Expected 0 duplicate groups for non-episode file, got %d", len(duplicates))
 	}
 }
+
+func TestTVShowAbbreviationPreservation(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Marvels.Agents.of.S.H.I.E.L.D.2013.1080p.BluRay-GROUP", "Marvels Agents Of S.H.I.E.L.D. (2013)"},
+		{"S.W.A.T.2017.720p.WEB-DL", "S.W.A.T. (2017)"},
+		{"N.C.I.S.2003", "N.C.I.S. (2003)"},
+		{"C.S.I.Crime.Scene.Investigation.2000", "C.S.I. Crime Scene Investigation (2000)"},
+		{"FBI.2018.1080p.HDTV", "FBI (2018)"},
+		{"SWAT.2017", "SWAT (2017)"},
+		{"Marvel's.Agents.of.SHIELD.S01E01", "Marvel's Agents Of SHIELD"},
+		{"The.X-Files.1993", "The X-Files (1993)"},
+		{"Spider-Man.The.Animated.Series.1994", "Spider-Man The Animated Series (1994)"},
+		{"Star.Trek.TNG.1987", "Star Trek TNG (1987)"},
+		{"U.S.Marshals.The.Series.2020", "U.S. Marshals The Series (2020)"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			result := CleanMovieName(tt.input)
+			if result != tt.expected {
+				t.Errorf("CleanMovieName(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}

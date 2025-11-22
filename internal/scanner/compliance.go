@@ -263,40 +263,64 @@ func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue
 func checkTVCompliance(filePath, libRoot string, season, episode int) *ComplianceIssue {
 	filename := filepath.Base(filePath)
 	seasonDir := filepath.Base(filepath.Dir(filePath))
-	showDir := filepath.Base(filepath.Dir(filepath.Dir(filePath)))
 
-	// Check if in proper Season ## folder
+	resolution := ResolveTVShowTitle(filePath, libRoot)
+
+	var cleanShowName string
+	if resolution.IsAmbiguous {
+		cleanShowName = resolution.ResolvedTitle
+	} else {
+		cleanShowName = resolution.ResolvedTitle
+	}
+
 	expectedSeasonDir := fmt.Sprintf("Season %02d", season)
 	if seasonDir != expectedSeasonDir {
-		// Non-compliant season folder
-		cleanShowName := CleanMovieName(showDir) // Reuse for show names
-
 		suggestedDir := filepath.Join(libRoot, cleanShowName, expectedSeasonDir)
 		suggestedFilename := fmt.Sprintf("%s S%02dE%02d%s", cleanShowName, season, episode, filepath.Ext(filePath))
 		suggestedPath := filepath.Join(suggestedDir, suggestedFilename)
 
+		problem := fmt.Sprintf("Not in proper 'Season %02d' folder (found: %s)", season, seasonDir)
+		if resolution.IsAmbiguous {
+			problem += fmt.Sprintf(" [AMBIGUOUS: %s]", resolution.Reason)
+		}
+
 		return &ComplianceIssue{
 			Path:            filePath,
 			Type:            "tv",
-			Problem:         fmt.Sprintf("Not in proper 'Season %02d' folder (found: %s)", season, seasonDir),
+			Problem:         problem,
 			SuggestedPath:   suggestedPath,
 			SuggestedAction: "reorganize",
 		}
 	}
 
-	// Check if filename follows release group naming
 	if isReleaseGroupFolder(filename) {
-		cleanShowName := CleanMovieName(showDir)
+		suggestedFilename := fmt.Sprintf("%s S%02dE%02d%s", cleanShowName, season, episode, filepath.Ext(filePath))
+		suggestedPath := filepath.Join(filepath.Dir(filePath), suggestedFilename)
 
+		problem := "Release group naming in filename"
+		if resolution.IsAmbiguous {
+			problem += fmt.Sprintf(" [AMBIGUOUS: %s]", resolution.Reason)
+		}
+
+		return &ComplianceIssue{
+			Path:            filePath,
+			Type:            "tv",
+			Problem:         problem,
+			SuggestedPath:   suggestedPath,
+			SuggestedAction: "rename",
+		}
+	}
+
+	if resolution.IsAmbiguous && (resolution.FolderMatch.Title != resolution.FilenameMatch.Title) {
 		suggestedFilename := fmt.Sprintf("%s S%02dE%02d%s", cleanShowName, season, episode, filepath.Ext(filePath))
 		suggestedPath := filepath.Join(filepath.Dir(filePath), suggestedFilename)
 
 		return &ComplianceIssue{
 			Path:            filePath,
 			Type:            "tv",
-			Problem:         "Release group naming in filename",
+			Problem:         fmt.Sprintf("Title mismatch: %s", resolution.Reason),
 			SuggestedPath:   suggestedPath,
-			SuggestedAction: "rename",
+			SuggestedAction: "manual_review",
 		}
 	}
 
