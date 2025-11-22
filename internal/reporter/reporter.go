@@ -21,7 +21,7 @@ const (
 // Report represents a scan report with duplicates and compliance issues
 type Report struct {
 	Timestamp          time.Time
-	LibraryType        string   // "movies" or "tv"
+	LibraryType        string // "movies" or "tv"
 	LibraryPaths       []string
 	MovieDuplicates    []scanner.MovieDuplicate
 	TVDuplicates       []scanner.TVDuplicate
@@ -33,9 +33,9 @@ type Report struct {
 
 // ReportFiles holds paths to generated report files
 type ReportFiles struct {
-	Summary     string // Main summary report
-	Duplicates  string // Detailed duplicates report (F1)
-	Compliance  string // Detailed compliance report (F2)
+	Summary    string // Main summary report
+	Duplicates string // Detailed duplicates report (F1)
+	Compliance string // Detailed compliance report (F2)
 }
 
 // Generate creates a timestamped report file (legacy - generates single comprehensive report)

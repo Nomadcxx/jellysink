@@ -79,7 +79,7 @@ var (
 
 	// Info style
 	InfoStyle = lipgloss.NewStyle().
-		Foreground(ColorInfo)
+			Foreground(ColorInfo)
 
 	// Stat style (for numbers)
 	StatStyle = lipgloss.NewStyle().
