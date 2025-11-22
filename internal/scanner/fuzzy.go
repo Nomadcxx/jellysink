@@ -13,6 +13,8 @@ import (
 // Pre-compiled regexes for performance optimization
 var (
 	releasePatterns     []*regexp.Regexp
+	preHyphenRegexes    []*regexp.Regexp
+	hyphenSuffixRegexes []*regexp.Regexp
 	collapseSpacesRegex *regexp.Regexp
 	removePunctRegex    *regexp.Regexp
 	yearParenRegex      *regexp.Regexp
@@ -105,6 +107,40 @@ func init() {
 	releasePatterns = make([]*regexp.Regexp, 0, len(patterns))
 	for _, pattern := range patterns {
 		releasePatterns = append(releasePatterns, regexp.MustCompile(`(?i)`+pattern))
+	}
+
+	// Compile hyphen-suffix regexes to catch cases when hyphen is replaced
+	// by spaces (e.g. x264-GROUP becomes x264 GROUP). These run after hyphen
+	// normalization and remove tokens like GROUP that were originally attached
+	// via hyphen instead of dots.
+	hyphenSuffixes := []string{
+		`\bGROUP\b`,
+		`\bMAG\b`,
+		`\bPSYCHD\b`,
+		`\bWILL1869\b`,
+		`\bSNAKE\b`,
+		`\bYTS\b`,
+		`\bRARBG\b`,
+		`\bMIRCREW\b`,
+		`\bMIRC\b`,
+		`\bASPiDe\b`,
+		`\bCiNEMiX\b`,
+		`\bCINEMIX\b`,
+		`\bPSYRHD\b`,
+	}
+	hyphenSuffixRegexes = make([]*regexp.Regexp, 0, len(hyphenSuffixes))
+	for _, p := range hyphenSuffixes {
+		hyphenSuffixRegexes = append(hyphenSuffixRegexes, regexp.MustCompile(`(?i)`+p))
+	}
+
+	// Pre-hyphen patterns to remove trailing groups before normalizing hyphens
+	preHyphenPatterns := []string{
+		`-[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`,       // -GROUP, -psychd-ml
+		`~\s?[A-Za-z0-9]+(?:\s[A-Za-z0-9]+)*$`, // ~ TombDoc
+	}
+	preHyphenRegexes = make([]*regexp.Regexp, 0, len(preHyphenPatterns))
+	for _, p := range preHyphenPatterns {
+		preHyphenRegexes = append(preHyphenRegexes, regexp.MustCompile(`(?i)`+p))
 	}
 
 	// Pre-compile commonly used regexes
@@ -282,6 +318,13 @@ func ExtractResolution(name string) string {
 // StripReleaseGroup removes release group markers from name
 // Uses pre-compiled regexes for performance
 func StripReleaseGroup(name string) string {
+	// First, remove common hyphen-suffixes attached directly to filenames like
+	// "-GROUP" or "-psychd-ml" before we replace hyphens. This prevents
+	// these tokens from becoming standalone words after hyphen normalization.
+	for _, re := range preHyphenRegexes {
+		name = re.ReplaceAllString(name, " ")
+	}
+
 	// Replace dots, underscores and hyphens with spaces FIRST to separate tokens
 	name = strings.ReplaceAll(name, ".", " ")
 	name = strings.ReplaceAll(name, "_", " ")
@@ -289,6 +332,12 @@ func StripReleaseGroup(name string) string {
 
 	// Apply all pre-compiled release group patterns
 	for _, re := range releasePatterns {
+		name = re.ReplaceAllString(name, " ")
+	}
+
+	// Now remove any leftover orphaned hyphen tokens that were converted into
+	// standalone words, e.g. GROUP, YTS
+	for _, re := range hyphenSuffixRegexes {
 		name = re.ReplaceAllString(name, " ")
 	}
 

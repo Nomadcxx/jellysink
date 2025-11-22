@@ -9,10 +9,10 @@ import (
 
 // TVDuplicate represents a group of duplicate TV episodes
 type TVDuplicate struct {
-	ShowName string      // Normalized show name
-	Season   int         // Season number
-	Episode  int         // Episode number
-	Files    []TVFile    // All versions found
+	ShowName string   // Normalized show name
+	Season   int      // Season number
+	Episode  int      // Episode number
+	Files    []TVFile // All versions found
 }
 
 // TVFile represents a single TV episode file

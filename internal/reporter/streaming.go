@@ -13,16 +13,16 @@ import (
 
 // StreamingReporter writes report sections incrementally to reduce memory usage
 type StreamingReporter struct {
-	timestamp      time.Time
-	libraryType    string
-	libraryPaths   []string
-	summaryWriter  *bufio.Writer
-	detailWriter   *bufio.Writer
-	summaryFile    *os.File
-	detailFile     *os.File
-	totalDups      int
-	totalFiles     int
-	totalSpace     int64
+	timestamp     time.Time
+	libraryType   string
+	libraryPaths  []string
+	summaryWriter *bufio.Writer
+	detailWriter  *bufio.Writer
+	summaryFile   *os.File
+	detailFile    *os.File
+	totalDups     int
+	totalFiles    int
+	totalSpace    int64
 }
 
 // NewStreamingReporter creates a new streaming reporter

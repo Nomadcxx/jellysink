@@ -347,4 +347,3 @@ func getTopOffenders(report reporter.Report) []reporter.Offender {
 func (m Model) ShouldClean() bool {
 	return m.shouldClean
 }
-
