@@ -20,6 +20,16 @@ type Daemon struct {
 
 // New creates a new daemon instance
 func New(cfg *config.Config) *Daemon {
+	// Set default log level first
+	scanner.SetDefaultLogLevel(scanner.LogLevelNormal)
+
+	// Respect configured log level for the daemon
+	if cfg != nil {
+		if lvl, err := scanner.ParseLogLevel(cfg.Daemon.LogLevel); err == nil {
+			scanner.SetDefaultLogLevel(lvl)
+		}
+	}
+
 	return &Daemon{
 		config: cfg,
 	}
@@ -28,37 +38,40 @@ func New(cfg *config.Config) *Daemon {
 // RunScan executes a full scan and generates a report
 // Supports context cancellation for graceful shutdown
 func (d *Daemon) RunScan(ctx context.Context) (string, error) {
-	report := reporter.Report{
-		Timestamp:    time.Now(),
-		LibraryPaths: []string{},
+	return d.RunScanWithProgress(ctx, nil)
+}
+
+// RunScanWithProgress executes a full scan with progress reporting
+func (d *Daemon) RunScanWithProgress(ctx context.Context, progressCh chan<- scanner.ScanProgress) (string, error) {
+	// Use orchestrator for coordinated scanning with progress
+	scanResult, err := scanner.RunFullScan(
+		ctx,
+		d.config.Libraries.Movies.Paths,
+		d.config.Libraries.TV.Paths,
+		progressCh,
+	)
+	if err != nil {
+		return "", fmt.Errorf("scan failed: %w", err)
 	}
 
-	// Use parallel scanning for better performance
-	parallelConfig := scanner.DefaultParallelConfig()
+	// Build report from scan result
+	report := reporter.Report{
+		Timestamp:          time.Now(),
+		LibraryPaths:       []string{},
+		MovieDuplicates:    scanResult.MovieDuplicates,
+		TVDuplicates:       scanResult.TVDuplicates,
+		ComplianceIssues:   scanResult.ComplianceIssues,
+		AmbiguousTVShows:   scanResult.AmbiguousTVShows,
+		TotalDuplicates:    scanResult.TotalDuplicates,
+		TotalFilesToDelete: scanResult.TotalFilesToDelete,
+		SpaceToFree:        scanResult.SpaceToFree,
+	}
 
-	// Scan movies if configured
+	// Set library type and paths
 	if len(d.config.Libraries.Movies.Paths) > 0 {
 		report.LibraryType = "movies"
 		report.LibraryPaths = d.config.Libraries.Movies.Paths
-
-		movieDuplicates, err := scanner.ScanMoviesParallel(ctx, d.config.Libraries.Movies.Paths, parallelConfig)
-		if err != nil {
-			return "", fmt.Errorf("failed to scan movies: %w", err)
-		}
-		report.MovieDuplicates = movieDuplicates
-
-		// Extract list of files to be deleted (skip these in compliance scan)
-		filesToDelete := scanner.GetDeleteList(movieDuplicates)
-
-		// Scan for compliance issues (excluding duplicate files)
-		complianceIssues, err := scanner.ScanMovieCompliance(d.config.Libraries.Movies.Paths, filesToDelete...)
-		if err != nil {
-			return "", fmt.Errorf("failed to scan movie compliance: %w", err)
-		}
-		report.ComplianceIssues = complianceIssues
 	}
-
-	// Scan TV shows if configured
 	if len(d.config.Libraries.TV.Paths) > 0 {
 		if report.LibraryType == "" {
 			report.LibraryType = "tv"
@@ -67,43 +80,10 @@ func (d *Daemon) RunScan(ctx context.Context) (string, error) {
 			report.LibraryType = "mixed"
 			report.LibraryPaths = append(report.LibraryPaths, d.config.Libraries.TV.Paths...)
 		}
-
-		tvDuplicates, err := scanner.ScanTVShowsParallel(ctx, d.config.Libraries.TV.Paths, parallelConfig)
-		if err != nil {
-			return "", fmt.Errorf("failed to scan TV shows: %w", err)
-		}
-		report.TVDuplicates = tvDuplicates
-
-		// Extract list of TV files to be deleted (skip these in compliance scan)
-		tvFilesToDelete := scanner.GetTVDeleteList(tvDuplicates)
-
-		// Scan for TV compliance issues (excluding duplicate files)
-		tvComplianceIssues, err := scanner.ScanTVCompliance(d.config.Libraries.TV.Paths, tvFilesToDelete...)
-		if err != nil {
-			return "", fmt.Errorf("failed to scan TV compliance: %w", err)
-		}
-		report.ComplianceIssues = append(report.ComplianceIssues, tvComplianceIssues...)
 	}
 
-	// Calculate statistics
-	report.TotalDuplicates = len(report.MovieDuplicates) + len(report.TVDuplicates)
-
-	for _, dup := range report.MovieDuplicates {
-		report.TotalFilesToDelete += len(dup.Files) - 1 // Don't count keeper
-		for i := 1; i < len(dup.Files); i++ {
-			report.SpaceToFree += dup.Files[i].Size
-		}
-	}
-
-	for _, dup := range report.TVDuplicates {
-		report.TotalFilesToDelete += len(dup.Files) - 1
-		for i := 1; i < len(dup.Files); i++ {
-			report.SpaceToFree += dup.Files[i].Size
-		}
-	}
-
-	// Save report
-	reportPath, err := d.saveReport(report)
+	// Save report with progress
+	reportPath, err := d.saveReportWithProgress(report, progressCh)
 	if err != nil {
 		return "", fmt.Errorf("failed to save report: %w", err)
 	}
@@ -113,15 +93,36 @@ func (d *Daemon) RunScan(ctx context.Context) (string, error) {
 
 // saveReport saves the report as JSON
 func (d *Daemon) saveReport(report reporter.Report) (string, error) {
+	return d.saveReportWithProgress(report, nil)
+}
+
+// saveReportWithProgress saves the report as JSON with progress reporting
+func (d *Daemon) saveReportWithProgress(report reporter.Report, progressCh chan<- scanner.ScanProgress) (string, error) {
+	var pr *scanner.ProgressReporter
+	if progressCh != nil {
+		pr = scanner.NewProgressReporter(progressCh, "report_generation")
+		pr.Update(0, "Saving report")
+	}
+
 	// Get report directory
 	home, err := os.UserHomeDir()
 	if err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to get home directory")
+		}
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 
 	reportDir := filepath.Join(home, ".local/share/jellysink/scan_results")
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to create report directory")
+		}
 		return "", fmt.Errorf("failed to create report directory: %w", err)
+	}
+
+	if pr != nil {
+		pr.Update(25, "Formatting JSON report")
 	}
 
 	// Generate filename with timestamp
@@ -131,19 +132,40 @@ func (d *Daemon) saveReport(report reporter.Report) (string, error) {
 	// Marshal to JSON
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to marshal report to JSON")
+		}
 		return "", fmt.Errorf("failed to marshal report: %w", err)
+	}
+
+	if pr != nil {
+		pr.Update(50, "Writing JSON report to disk")
 	}
 
 	// Write to file
 	if err := os.WriteFile(reportPath, data, 0644); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to write JSON report")
+		}
 		return "", fmt.Errorf("failed to write report: %w", err)
 	}
 
-	// Also generate text reports for reference
-	_, err = reporter.GenerateDetailed(report)
+	if pr != nil {
+		pr.Update(75, "Generating text reports")
+	}
+
+	// Generate text reports with progress
+	_, err = reporter.GenerateDetailedWithProgress(report, pr)
 	if err != nil {
 		// Non-fatal - log but continue
+		if pr != nil {
+			pr.LogError(err, "Failed to generate text reports")
+		}
 		fmt.Fprintf(os.Stderr, "Warning: failed to generate text reports: %v\n", err)
+	}
+
+	if pr != nil {
+		pr.Complete("Report saved successfully")
 	}
 
 	return reportPath, nil

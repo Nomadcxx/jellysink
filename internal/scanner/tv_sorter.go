@@ -519,25 +519,48 @@ func (c *OMDBClient) SearchSeries(name string) (*OMDBSeries, error) {
 
 // VerifyTVShowTitle uses TVDB (with OMDB fallback) to verify and resolve a TV show title
 func VerifyTVShowTitle(resolution *TVTitleResolution, tvdbKey, omdbKey string) error {
+	return VerifyTVShowTitleWithReporter(resolution, tvdbKey, omdbKey, nil)
+}
+
+// VerifyTVShowTitleWithReporter verifies title using TVDB/OMDB and reports errors to provided ProgressReporter
+func VerifyTVShowTitleWithReporter(resolution *TVTitleResolution, tvdbKey, omdbKey string, pr *ProgressReporter) error {
 	if tvdbKey == "" && omdbKey == "" {
-		return fmt.Errorf("no API keys configured (TVDB or OMDB required)")
+		err := fmt.Errorf("no API keys configured (TVDB or OMDB required)")
+		if pr != nil {
+			pr.LogError(err, "no API keys configured")
+		}
+		return err
 	}
 
 	// Try TVDB first
 	if tvdbKey != "" {
 		if err := verifyWithTVDB(resolution, tvdbKey); err == nil {
+			if pr != nil {
+				pr.SendSeverityImmediate("info", fmt.Sprintf("TVDB verified: %s", resolution.ResolvedTitle))
+			}
 			return nil
+		} else if pr != nil {
+			pr.LogError(err, "TVDB verification failed")
 		}
 	}
 
 	// Fallback to OMDB if TVDB fails
 	if omdbKey != "" {
 		if err := verifyWithOMDB(resolution, omdbKey); err == nil {
+			if pr != nil {
+				pr.SendSeverityImmediate("info", fmt.Sprintf("OMDB verified: %s", resolution.ResolvedTitle))
+			}
 			return nil
+		} else if pr != nil {
+			pr.LogError(err, "OMDB verification failed")
 		}
 	}
 
-	return fmt.Errorf("both TVDB and OMDB verification failed")
+	err := fmt.Errorf("both TVDB and OMDB verification failed")
+	if pr != nil {
+		pr.LogError(err, "verification failed for both services")
+	}
+	return err
 }
 
 // verifyWithTVDB uses TVDB API to verify title

@@ -68,11 +68,42 @@ func DefaultConfig() Config {
 // Clean performs both duplicate deletion AND compliance fixes
 func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplicate,
 	compliance []scanner.ComplianceIssue, config Config) (CleanResult, error) {
+	return CleanWithProgress(duplicates, tvDuplicates, compliance, config, nil)
+}
+
+// CleanWithProgress performs both duplicate deletion and compliance fixes,
+// reporting progress to the provided channel. Progress messages include info and errors.
+func CleanWithProgress(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplicate,
+	compliance []scanner.ComplianceIssue, config Config, progressCh chan<- scanner.ScanProgress) (CleanResult, error) {
 
 	result := CleanResult{
 		DryRun:     config.DryRun,
 		Operations: []Operation{},
 		Errors:     []error{},
+	}
+
+	// Create progress reporter
+	var pr *scanner.ProgressReporter
+	if progressCh != nil {
+		pr = scanner.NewProgressReporterWithInterval(progressCh, "cleaning", 200*time.Millisecond)
+	}
+
+	// Calculate total operations (deletes + compliance fixes)
+	totalOps := 0
+	for _, dup := range duplicates {
+		if len(dup.Files) > 1 {
+			totalOps += len(dup.Files) - 1
+		}
+	}
+	for _, dup := range tvDuplicates {
+		if len(dup.Files) > 1 {
+			totalOps += len(dup.Files) - 1
+		}
+	}
+	totalOps += len(compliance)
+
+	if pr != nil {
+		pr.Start(totalOps, fmt.Sprintf("Preparing cleanup (%d operations)", totalOps))
 	}
 
 	// Safety check: verify total size doesn't exceed limit
@@ -82,6 +113,8 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 			totalSize/(1024*1024*1024), config.MaxSizeGB)
 	}
 
+	processed := 0
+
 	// Process duplicate deletions
 	for _, dup := range duplicates {
 		// Skip first file (keeper)
@@ -90,8 +123,11 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 
 			// Safety check
 			if isProtectedPath(file.Path, config.ProtectedPaths) {
-				result.Errors = append(result.Errors,
-					fmt.Errorf("refusing to delete protected path: %s", file.Path))
+				err := fmt.Errorf("refusing to delete protected path: %s", file.Path)
+				result.Errors = append(result.Errors, err)
+				if pr != nil {
+					pr.LogError(err, err.Error())
+				}
 				continue
 			}
 
@@ -106,17 +142,30 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 					result.Errors = append(result.Errors,
 						fmt.Errorf("failed to delete %s: %w", file.Path, err))
 					op.Completed = false
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Failed to delete: %s", file.Path))
+					}
 				} else {
 					op.Completed = true
 					result.DuplicatesDeleted++
 					result.SpaceFreed += file.Size
+					if pr != nil {
+						pr.Update(processed+1, fmt.Sprintf("Deleted: %s", file.Path))
+					}
+
 				}
 			} else {
-				// Dry-run: just log the operation
 				op.Completed = true
+				if pr != nil {
+					pr.Update(processed+1, fmt.Sprintf("Dry-run: delete %s", file.Path))
+				}
 			}
 
 			result.Operations = append(result.Operations, op)
+			processed++
+			if pr != nil {
+				pr.Update(processed, fmt.Sprintf("Processed %d/%d", processed, totalOps))
+			}
 		}
 	}
 
@@ -126,8 +175,11 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 			file := dup.Files[i]
 
 			if isProtectedPath(file.Path, config.ProtectedPaths) {
-				result.Errors = append(result.Errors,
-					fmt.Errorf("refusing to delete protected path: %s", file.Path))
+				err := fmt.Errorf("refusing to delete protected path: %s", file.Path)
+				result.Errors = append(result.Errors, err)
+				if pr != nil {
+					pr.LogError(err, err.Error())
+				}
 				continue
 			}
 
@@ -142,16 +194,30 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 					result.Errors = append(result.Errors,
 						fmt.Errorf("failed to delete %s: %w", file.Path, err))
 					op.Completed = false
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Failed to delete: %s", file.Path))
+					}
 				} else {
 					op.Completed = true
 					result.DuplicatesDeleted++
 					result.SpaceFreed += file.Size
+					if pr != nil {
+						pr.Update(processed+1, fmt.Sprintf("Deleted: %s", file.Path))
+					}
+
 				}
 			} else {
 				op.Completed = true
+				if pr != nil {
+					pr.Update(processed+1, fmt.Sprintf("Dry-run: delete %s", file.Path))
+				}
 			}
 
 			result.Operations = append(result.Operations, op)
+			processed++
+			if pr != nil {
+				pr.Update(processed, fmt.Sprintf("Processed %d/%d", processed, totalOps))
+			}
 		}
 	}
 
@@ -159,14 +225,20 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 	for i, issue := range compliance {
 		// Skip manual review items (collisions, sample files, etc.)
 		if issue.SuggestedAction == "manual_review" {
-			result.Errors = append(result.Errors,
-				fmt.Errorf("skipped (needs manual review): %s - %s", issue.Path, issue.Problem))
+			err := fmt.Errorf("skipped (needs manual review): %s - %s", issue.Path, issue.Problem)
+			result.Errors = append(result.Errors, err)
+			if pr != nil {
+				pr.LogError(err, err.Error())
+			}
 			continue
 		}
 
 		if isProtectedPath(issue.Path, config.ProtectedPaths) {
-			result.Errors = append(result.Errors,
-				fmt.Errorf("refusing to modify protected path: %s", issue.Path))
+			err := fmt.Errorf("refusing to modify protected path: %s", issue.Path)
+			result.Errors = append(result.Errors, err)
+			if pr != nil {
+				pr.LogError(err, err.Error())
+			}
 			continue
 		}
 
@@ -176,14 +248,16 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 		// Use scanner's Apply functions which handle folder detection
 		if !config.DryRun {
 			// Progress indicator
-			if len(compliance) > 5 && i%5 == 0 {
+			if pr != nil && len(compliance) > 5 && i%5 == 0 {
+				pr.StageUpdate("fixing", fmt.Sprintf("Fixing compliance issues: %d/%d", i, len(compliance)))
+			} else if len(compliance) > 5 && i%5 == 0 {
 				fmt.Printf("Fixing compliance issues: %d/%d\n", i, len(compliance))
 			}
 
 			if issue.Type == "movie" {
-				err = scanner.ApplyMovieCompliance(issue)
+				err = scanner.ApplyMovieComplianceWithReporter(issue, pr)
 			} else if issue.Type == "tv" {
-				err = scanner.ApplyTVCompliance(issue)
+				err = scanner.ApplyTVComplianceWithReporter(issue, pr)
 			} else {
 				err = fmt.Errorf("unknown issue type: %s", issue.Type)
 			}
@@ -200,12 +274,22 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 		if err != nil {
 			result.Errors = append(result.Errors, err)
 			op.Completed = false
+			if pr != nil {
+				pr.LogError(err, fmt.Sprintf("Failed to apply compliance: %s", issue.Path))
+			}
 		} else {
 			op.Completed = true
 			result.ComplianceFixed++
+			if pr != nil {
+				pr.Update(processed+1, fmt.Sprintf("Fixed compliance: %s", issue.Path))
+			}
 		}
 
 		result.Operations = append(result.Operations, op)
+		processed++
+		if pr != nil {
+			pr.Update(processed, fmt.Sprintf("Processed %d/%d", processed, totalOps))
+		}
 	}
 
 	// Final progress message
@@ -213,11 +297,18 @@ func Clean(duplicates []scanner.MovieDuplicate, tvDuplicates []scanner.TVDuplica
 		fmt.Printf("Fixed %d compliance issues\n", result.ComplianceFixed)
 	}
 
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Finished cleanup: %d deleted, %d fixed", result.DuplicatesDeleted, result.ComplianceFixed))
+	}
+
 	// Write operation log (for potential rollback)
 	if !config.DryRun && len(result.Operations) > 0 {
 		if err := writeOperationLog(result.Operations, config.LogPath); err != nil {
 			result.Errors = append(result.Errors,
 				fmt.Errorf("failed to write operation log: %w", err))
+			if pr != nil {
+				pr.LogError(err, "failed to write operation log")
+			}
 		}
 	}
 

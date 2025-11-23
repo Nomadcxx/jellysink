@@ -35,6 +35,7 @@ type TVLibrary struct {
 type DaemonConfig struct {
 	ScanFrequency    string `toml:"scan_frequency"`     // daily, weekly, biweekly
 	ReportOnComplete bool   `toml:"report_on_complete"` // launch TUI on scan complete
+	LogLevel         string `toml:"log_level"`          // quiet, normal, verbose
 }
 
 // APIConfig holds API keys for metadata services
@@ -69,6 +70,7 @@ func DefaultConfig() *Config {
 		Daemon: DaemonConfig{
 			ScanFrequency:    "weekly",
 			ReportOnComplete: true,
+			LogLevel:         "normal",
 		},
 		API: APIConfig{
 			TVDB: TVDBConfig{

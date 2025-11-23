@@ -24,6 +24,8 @@ import (
 var (
 	cfgFile string
 	dryRun  bool
+	quiet   bool
+	verbose bool
 
 	// Version information (set via -ldflags during build)
 	version   = "dev"
@@ -87,6 +89,8 @@ var versionCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.config/jellysink/config.toml)")
 	cleanCmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be deleted without actually deleting")
+	scanCmd.Flags().BoolVar(&quiet, "quiet", false, "minimal output (errors only)")
+	scanCmd.Flags().BoolVar(&verbose, "verbose", false, "detailed output (debug info)")
 
 	rootCmd.AddCommand(scanCmd)
 	rootCmd.AddCommand(viewCmd)
@@ -197,20 +201,83 @@ func runScan(cmd *cobra.Command, args []string) {
 		cancel()
 	}()
 
+	// Determine log level from flags
+	logLevel := scanner.LogLevelNormal
+	if quiet && verbose {
+		fmt.Fprintf(os.Stderr, "Error: --quiet and --verbose are mutually exclusive\n")
+		os.Exit(1)
+	}
+	if quiet {
+		logLevel = scanner.LogLevelQuiet
+	}
+	if verbose {
+		logLevel = scanner.LogLevelVerbose
+	}
+
+	// Set the global log level for progress reporters
+	scanner.SetDefaultLogLevel(logLevel)
+
 	fmt.Println("Starting scan...")
-	d := daemon.New(cfg)
-	reportPath, err := d.RunScan(ctx)
-	if err != nil {
-		if err == context.Canceled {
-			fmt.Fprintf(os.Stderr, "Scan cancelled by user\n")
+
+	// Create progress channel
+	progressCh := make(chan scanner.ScanProgress, 100)
+
+	// Start scan in goroutine
+	type scanResult struct {
+		path string
+		err  error
+	}
+	resultCh := make(chan scanResult)
+
+	go func() {
+		d := daemon.New(cfg)
+		path, err := d.RunScanWithProgress(ctx, progressCh)
+		resultCh <- scanResult{path, err}
+		close(progressCh)
+	}()
+
+	// Display progress with log level filtering
+	lastOperation := ""
+	for progress := range progressCh {
+		// Apply log level filtering
+		shouldShow := false
+		switch logLevel {
+		case scanner.LogLevelQuiet:
+			shouldShow = progress.Severity == "error" || progress.Severity == "critical"
+		case scanner.LogLevelNormal:
+			shouldShow = progress.Severity != "debug"
+		case scanner.LogLevelVerbose:
+			shouldShow = true
+		}
+
+		if !shouldShow {
+			continue
+		}
+
+		// Format output based on severity
+		if progress.Severity == "error" || progress.Severity == "critical" {
+			fmt.Fprintf(os.Stderr, "✗ %s\n", progress.Message)
+		} else if progress.Operation != lastOperation {
+			fmt.Printf("\n%s...\n", progress.Message)
+			lastOperation = progress.Operation
+		} else if logLevel == scanner.LogLevelVerbose || progress.Current%50 == 0 || progress.Stage == "complete" {
+			fmt.Printf("  %.1f%% - %s\n", progress.Percentage, progress.Message)
+		}
+	}
+
+	// Get result
+	result := <-resultCh
+	if result.err != nil {
+		if result.err == context.Canceled {
+			fmt.Fprintf(os.Stderr, "\nScan cancelled by user\n")
 			os.Exit(130) // Exit code 130 for SIGINT
 		}
-		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\nScan failed: %v\n", result.err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("\nScan complete! Report saved to:\n  %s\n\n", reportPath)
-	fmt.Printf("View report with: jellysink view %s\n", reportPath)
+	fmt.Printf("\n✓ Scan complete! Report saved to:\n  %s\n\n", result.path)
+	fmt.Printf("View report with: jellysink view %s\n", result.path)
 }
 
 func runView(cmd *cobra.Command, args []string) {

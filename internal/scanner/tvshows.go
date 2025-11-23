@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // TVDuplicate represents a group of duplicate TV episodes
@@ -27,18 +28,42 @@ type TVFile struct {
 // ScanTVShows scans TV library paths for duplicate episodes
 // Returns groups of duplicate episodes
 func ScanTVShows(paths []string) ([]TVDuplicate, error) {
+	return ScanTVShowsWithProgress(paths, nil)
+}
+
+// ScanTVShowsWithProgress scans TV library paths with progress reporting
+func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]TVDuplicate, error) {
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "scanning_tv", 200*time.Millisecond)
+		pr.send(0, "Counting TV files...")
+
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Scanning %d TV files...", total))
+	}
+
 	// Map: normalized_show|S##E## -> []TVFile
 	episodeGroups := make(map[string]*TVDuplicate)
+	filesProcessed := 0
 
 	for _, libPath := range paths {
 		// Verify path exists
 		if _, err := os.Stat(libPath); err != nil {
+			if pr != nil {
+				pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+			}
 			return nil, fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 		}
 
 		// Walk directory tree
 		err := filepath.Walk(libPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				if pr != nil {
+					pr.LogError(err, fmt.Sprintf("Error accessing path during walk: %s", path))
+				}
 				return err
 			}
 
@@ -50,6 +75,11 @@ func ScanTVShows(paths []string) ([]TVDuplicate, error) {
 			// Only process video files
 			if !isVideoFile(path) {
 				return nil
+			}
+
+			filesProcessed++
+			if pr != nil && filesProcessed%10 == 0 {
+				pr.Update(filesProcessed, fmt.Sprintf("Processing: %s", filepath.Base(path)))
 			}
 
 			// Extract episode info from filename
@@ -98,6 +128,10 @@ func ScanTVShows(paths []string) ([]TVDuplicate, error) {
 		if len(group.Files) > 1 {
 			duplicates = append(duplicates, *group)
 		}
+	}
+
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d duplicate episodes", len(duplicates)))
 	}
 
 	return duplicates, nil

@@ -45,7 +45,7 @@ type Model struct {
 
 	// Scanning state
 	scanning        bool
-	scanLogs        []string
+	scanLogs        []LogLine
 	currentProgress string
 	progressPercent float64
 	cancelled       bool
@@ -80,8 +80,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.progressPercent = msg.Percentage
 
 		// Add to log buffer (keep last 100 lines)
-		logLine := fmt.Sprintf("[%02d:%02d] %s", msg.ElapsedSeconds/60, msg.ElapsedSeconds%60, msg.Message)
-		m.scanLogs = append(m.scanLogs, logLine)
+		logEntry := LogLine{
+			Timestamp: fmt.Sprintf("%02d:%02d", msg.ElapsedSeconds/60, msg.ElapsedSeconds%60),
+			Operation: msg.Operation,
+			Message:   msg.Message,
+			Severity:  msg.Severity,
+		}
+		m.scanLogs = append(m.scanLogs, logEntry)
 		if len(m.scanLogs) > 1000 {
 			m.scanLogs = m.scanLogs[len(m.scanLogs)-1000:]
 		}
@@ -104,7 +109,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scanErrorMsg:
 		// Scan error - show error and exit
 		m.scanning = false
-		m.scanLogs = append(m.scanLogs, fmt.Sprintf("ERROR: %v", msg))
+		m.scanLogs = append(m.scanLogs, LogLine{Timestamp: fmt.Sprintf("%02d:%02d", 0, 0), Operation: "scan", Message: fmt.Sprintf("ERROR: %v", msg), Severity: "error"})
 		m.viewport.SetContent(m.renderScanning())
 		return m, nil
 
@@ -139,7 +144,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "q":
 			if m.mode == ViewScanning {
 				m.cancelled = true
-				m.scanLogs = append(m.scanLogs, "Cancelling scan...")
+				m.scanLogs = append(m.scanLogs, LogLine{Timestamp: "", Operation: "scan", Message: "Cancelling scan...", Severity: "warn"})
 			}
 			return m, tea.Quit
 
@@ -631,7 +636,14 @@ func (m Model) renderScanning() string {
 	}
 
 	for i := startIdx; i < len(m.scanLogs); i++ {
-		sb.WriteString(MutedStyle.Render(m.scanLogs[i]) + "\n")
+		entry := m.scanLogs[i]
+		var lineStyle = MutedStyle
+		if entry.Severity == "error" {
+			lineStyle = ErrorStyle
+		} else if entry.Severity == "warn" {
+			lineStyle = WarningStyle
+		}
+		sb.WriteString(lineStyle.Render(fmt.Sprintf("%s %s [%s] %s", entry.Timestamp, entry.Operation, strings.ToUpper(entry.Severity), entry.Message)) + "\n")
 	}
 
 	if m.cancelled {

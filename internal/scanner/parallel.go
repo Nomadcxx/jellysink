@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // ParallelConfig holds configuration for parallel scanning
@@ -21,17 +23,33 @@ func DefaultParallelConfig() ParallelConfig {
 	}
 }
 
-// ScanMoviesParallel scans movie libraries using worker pools for improved performance
-// Processes multiple library paths concurrently
-// Supports context cancellation for graceful shutdown
-func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConfig) ([]MovieDuplicate, error) {
+// ScanMoviesParallelWithProgress scans movie libraries in parallel and reports progress
+func ScanMoviesParallelWithProgress(ctx context.Context, paths []string, config ParallelConfig, progressCh chan<- ScanProgress) ([]MovieDuplicate, error) {
 	if config.Workers <= 0 {
 		config.Workers = runtime.NumCPU()
+	}
+
+	// Create progress reporter when channel provided
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "scanning_movies", 200*time.Millisecond)
+		pr.send(0, "Counting movie files...")
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			if pr != nil {
+				pr.LogError(err, "failed to count files")
+			}
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Scanning %d movie files...", total))
 	}
 
 	// Shared data structure (protected by mutex)
 	var mu sync.Mutex
 	movieGroups := make(map[string]*MovieDuplicate)
+
+	// Worker counters
+	var filesProcessed int64
 
 	// WaitGroup to track worker completion
 	var wg sync.WaitGroup
@@ -61,7 +79,7 @@ func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConf
 					if !ok {
 						return
 					}
-					if err := scanMoviePathParallel(ctx, libPath, movieGroups, &mu); err != nil {
+					if err := scanMoviePathParallelWithProgress(ctx, libPath, movieGroups, &mu, &filesProcessed, pr); err != nil {
 						errOnce.Do(func() {
 							scanErr = err
 							errChan <- err
@@ -91,6 +109,9 @@ func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConf
 
 	// Check for errors
 	if scanErr != nil {
+		if pr != nil {
+			pr.LogError(scanErr, "parallel scan failed")
+		}
 		return nil, scanErr
 	}
 
@@ -102,14 +123,26 @@ func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConf
 		}
 	}
 
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d duplicate groups", len(duplicates)))
+	}
+
 	return duplicates, nil
 }
 
-// scanMoviePathParallel scans a single movie library path (thread-safe)
-// Supports context cancellation
-func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[string]*MovieDuplicate, mu *sync.Mutex) error {
+// ScanMoviesParallel scans movie libraries using worker pools for improved performance (legacy wrapper)
+func ScanMoviesParallel(ctx context.Context, paths []string, config ParallelConfig) ([]MovieDuplicate, error) {
+	return ScanMoviesParallelWithProgress(ctx, paths, config, nil)
+}
+
+// scanMoviePathParallelWithProgress scans a single movie library path (thread-safe)
+// Supports context cancellation and progress reporting
+func scanMoviePathParallelWithProgress(ctx context.Context, libPath string, movieGroups map[string]*MovieDuplicate, mu *sync.Mutex, filesProcessed *int64, pr *ProgressReporter) error {
 	// Verify path exists
 	if _, err := os.Stat(libPath); err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+		}
 		return fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 	}
 
@@ -123,6 +156,9 @@ func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[
 		}
 
 		if err != nil {
+			if pr != nil {
+				pr.LogError(err, fmt.Sprintf("Error accessing path during walk: %s", path))
+			}
 			return err
 		}
 
@@ -147,6 +183,12 @@ func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[
 			movieTitle = filepath.Base(path)
 		}
 
+		// Update files processed counter and report progress
+		current := atomic.AddInt64(filesProcessed, 1)
+		if pr != nil && current%10 == 0 {
+			pr.Update(int(current), fmt.Sprintf("Processing: %s", filepath.Base(path)))
+		}
+
 		// Create group key: normalized_name|year
 		normalized := NormalizeName(movieTitle)
 		year := ExtractYear(movieTitle)
@@ -168,23 +210,47 @@ func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[
 	})
 
 	if err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("error scanning %s", libPath))
+		}
 		return fmt.Errorf("error scanning %s: %w", libPath, err)
 	}
 
 	return nil
 }
 
-// ScanTVShowsParallel scans TV library paths using worker pools for improved performance
-// Processes multiple library paths concurrently
-// Supports context cancellation for graceful shutdown
-func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelConfig) ([]TVDuplicate, error) {
+// scanMoviePathParallel delegates to the progress-aware variant for legacy callers
+func scanMoviePathParallel(ctx context.Context, libPath string, movieGroups map[string]*MovieDuplicate, mu *sync.Mutex) error {
+	var filesProcessed int64
+	return scanMoviePathParallelWithProgress(ctx, libPath, movieGroups, mu, &filesProcessed, nil)
+}
+
+// ScanTVShowsParallelWithProgress scans TV libraries in parallel and reports progress
+func ScanTVShowsParallelWithProgress(ctx context.Context, paths []string, config ParallelConfig, progressCh chan<- ScanProgress) ([]TVDuplicate, error) {
 	if config.Workers <= 0 {
 		config.Workers = runtime.NumCPU()
+	}
+
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "scanning_tv", 200*time.Millisecond)
+		pr.send(0, "Counting TV files...")
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			if pr != nil {
+				pr.LogError(err, "failed to count files")
+			}
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Scanning %d TV files...", total))
 	}
 
 	// Shared data structure (protected by mutex)
 	var mu sync.Mutex
 	episodeGroups := make(map[string]*TVDuplicate)
+
+	// Worker counters
+	var filesProcessed int64
 
 	// WaitGroup to track worker completion
 	var wg sync.WaitGroup
@@ -214,7 +280,7 @@ func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelCon
 					if !ok {
 						return
 					}
-					if err := scanTVPathParallel(ctx, libPath, episodeGroups, &mu); err != nil {
+					if err := scanTVPathParallelWithProgress(ctx, libPath, episodeGroups, &mu, &filesProcessed, pr); err != nil {
 						errOnce.Do(func() {
 							scanErr = err
 							errChan <- err
@@ -244,6 +310,9 @@ func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelCon
 
 	// Check for errors
 	if scanErr != nil {
+		if pr != nil {
+			pr.LogError(scanErr, "parallel tv scan failed")
+		}
 		return nil, scanErr
 	}
 
@@ -255,14 +324,26 @@ func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelCon
 		}
 	}
 
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d duplicate episodes", len(duplicates)))
+	}
+
 	return duplicates, nil
 }
 
-// scanTVPathParallel scans a single TV library path (thread-safe)
-// Supports context cancellation
-func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[string]*TVDuplicate, mu *sync.Mutex) error {
+// ScanTVShowsParallel scans TV library paths using worker pools for improved performance (legacy wrapper)
+func ScanTVShowsParallel(ctx context.Context, paths []string, config ParallelConfig) ([]TVDuplicate, error) {
+	return ScanTVShowsParallelWithProgress(ctx, paths, config, nil)
+}
+
+// scanTVPathParallelWithProgress scans a single TV library path (thread-safe)
+// Supports context cancellation and progress reporting
+func scanTVPathParallelWithProgress(ctx context.Context, libPath string, episodeGroups map[string]*TVDuplicate, mu *sync.Mutex, filesProcessed *int64, pr *ProgressReporter) error {
 	// Verify path exists
 	if _, err := os.Stat(libPath); err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+		}
 		return fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 	}
 
@@ -276,6 +357,9 @@ func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[s
 		}
 
 		if err != nil {
+			if pr != nil {
+				pr.LogError(err, fmt.Sprintf("Error accessing path during walk: %s", path))
+			}
 			return err
 		}
 
@@ -298,6 +382,12 @@ func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[s
 
 		// Parse TV file metadata
 		tvFile := parseTVFile(path, info)
+
+		// Update files processed counter and report progress
+		current := atomic.AddInt64(filesProcessed, 1)
+		if pr != nil && current%10 == 0 {
+			pr.Update(int(current), fmt.Sprintf("Processing: %s", filepath.Base(path)))
+		}
 
 		// Extract show name from parent directory structure
 		showDir := filepath.Dir(filepath.Dir(path)) // Go up two levels
@@ -326,8 +416,17 @@ func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[s
 	})
 
 	if err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("error scanning %s", libPath))
+		}
 		return fmt.Errorf("error scanning %s: %w", libPath, err)
 	}
 
 	return nil
+}
+
+// scanTVPathParallel delegates to the progress-aware variant for legacy callers
+func scanTVPathParallel(ctx context.Context, libPath string, episodeGroups map[string]*TVDuplicate, mu *sync.Mutex) error {
+	var filesProcessed int64
+	return scanTVPathParallelWithProgress(ctx, libPath, episodeGroups, mu, &filesProcessed, nil)
 }

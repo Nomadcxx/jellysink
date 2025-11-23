@@ -64,8 +64,20 @@ func Generate(report Report) (string, error) {
 
 // GenerateDetailed creates separate report files for TUI display (summary + detailed sections)
 func GenerateDetailed(report Report) (ReportFiles, error) {
+	return GenerateDetailedWithProgress(report, nil)
+}
+
+// GenerateDetailedWithProgress creates separate report files with progress reporting
+func GenerateDetailedWithProgress(report Report, pr *scanner.ProgressReporter) (ReportFiles, error) {
+	if pr != nil {
+		pr.Update(0, "Creating report directory")
+	}
+
 	reportDir := getReportDir()
 	if err := os.MkdirAll(reportDir, 0755); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to create report directory")
+		}
 		return ReportFiles{}, fmt.Errorf("failed to create report directory: %w", err)
 	}
 
@@ -77,22 +89,47 @@ func GenerateDetailed(report Report) (ReportFiles, error) {
 		Compliance: filepath.Join(reportDir, timestamp+"_compliance.txt"),
 	}
 
+	if pr != nil {
+		pr.Update(33, "Building summary report")
+	}
+
 	// Generate summary report (for TUI prompt)
 	summaryContent := buildSummaryReport(report)
 	if err := os.WriteFile(files.Summary, []byte(summaryContent), 0644); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to write summary report")
+		}
 		return files, fmt.Errorf("failed to write summary: %w", err)
+	}
+
+	if pr != nil {
+		pr.Update(66, "Building duplicates report")
 	}
 
 	// Generate detailed duplicates report (F1)
 	duplicatesContent := buildDuplicatesReport(report)
 	if err := os.WriteFile(files.Duplicates, []byte(duplicatesContent), 0644); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to write duplicates report")
+		}
 		return files, fmt.Errorf("failed to write duplicates: %w", err)
+	}
+
+	if pr != nil {
+		pr.Update(100, "Building compliance report")
 	}
 
 	// Generate detailed compliance report (F2)
 	complianceContent := buildComplianceReport(report)
 	if err := os.WriteFile(files.Compliance, []byte(complianceContent), 0644); err != nil {
+		if pr != nil {
+			pr.LogError(err, "Failed to write compliance report")
+		}
 		return files, fmt.Errorf("failed to write compliance: %w", err)
+	}
+
+	if pr != nil {
+		pr.Complete("Report generation complete")
 	}
 
 	return files, nil

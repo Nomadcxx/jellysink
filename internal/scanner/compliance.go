@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // ComplianceIssue represents a naming compliance problem
@@ -21,8 +22,26 @@ type ComplianceIssue struct {
 // Expected format: Movie Name (Year)/Movie Name (Year).ext
 // excludePaths: list of file paths to skip (e.g., files marked for deletion in duplicate scan)
 func ScanMovieCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue, error) {
+	return ScanMovieComplianceWithProgress(paths, nil, excludePaths...)
+}
+
+// ScanMovieComplianceWithProgress scans for compliance issues with progress reporting
+func ScanMovieComplianceWithProgress(paths []string, progressCh chan<- ScanProgress, excludePaths ...string) ([]ComplianceIssue, error) {
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "compliance_movies", 200*time.Millisecond)
+		pr.send(0, "Counting movie files for compliance check...")
+
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Checking %d movie files for compliance...", total))
+	}
+
 	var issues []ComplianceIssue
 	targetPaths := make(map[string]string) // suggestedPath -> originalPath
+	filesProcessed := 0
 
 	// Build exclusion set for fast lookup
 	excludeSet := make(map[string]bool)
@@ -50,6 +69,11 @@ func ScanMovieCompliance(paths []string, excludePaths ...string) ([]ComplianceIs
 			// Only check video files
 			if info.IsDir() || !isVideoFile(path) {
 				return nil
+			}
+
+			filesProcessed++
+			if pr != nil && filesProcessed%10 == 0 {
+				pr.Update(filesProcessed, fmt.Sprintf("Checking: %s", filepath.Base(path)))
 			}
 
 			// Skip files marked for deletion in duplicate scan
@@ -84,6 +108,10 @@ func ScanMovieCompliance(paths []string, excludePaths ...string) ([]ComplianceIs
 		if err != nil {
 			return nil, fmt.Errorf("error scanning %s: %w", libPath, err)
 		}
+	}
+
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d compliance issues", len(issues)))
 	}
 
 	return issues, nil
@@ -195,7 +223,25 @@ func checkMovieCompliance(filePath, libRoot string) *ComplianceIssue {
 // Expected format: Show Name (Year)/Season ##/Show Name (Year) S##E##.ext
 // excludePaths: list of file paths to skip (e.g., files marked for deletion in duplicate scan)
 func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue, error) {
+	return ScanTVComplianceWithProgress(paths, nil, excludePaths...)
+}
+
+// ScanTVComplianceWithProgress scans for TV compliance issues with progress reporting
+func ScanTVComplianceWithProgress(paths []string, progressCh chan<- ScanProgress, excludePaths ...string) ([]ComplianceIssue, error) {
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "compliance_tv", 200*time.Millisecond)
+		pr.send(0, "Counting TV files for compliance check...")
+
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Checking %d TV files for compliance...", total))
+	}
+
 	var issues []ComplianceIssue
+	filesProcessed := 0
 
 	// Build exclusion set for fast lookup
 	excludeSet := make(map[string]bool)
@@ -223,6 +269,11 @@ func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue
 			// Only check video files
 			if info.IsDir() || !isVideoFile(path) {
 				return nil
+			}
+
+			filesProcessed++
+			if pr != nil && filesProcessed%10 == 0 {
+				pr.Update(filesProcessed, fmt.Sprintf("Checking: %s", filepath.Base(path)))
 			}
 
 			// Skip files marked for deletion in duplicate scan
@@ -254,6 +305,10 @@ func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue
 		if err != nil {
 			return nil, fmt.Errorf("error scanning %s: %w", libPath, err)
 		}
+	}
+
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d compliance issues", len(issues)))
 	}
 
 	return issues, nil
@@ -400,6 +455,39 @@ func hasYearInParentheses(s string) bool {
 // ApplyMovieCompliance applies the suggested fix for a compliance issue
 // Creates folder if needed, renames/moves file to compliant location
 func ApplyMovieCompliance(issue ComplianceIssue) error {
+	return applyMovieComplianceInternal(issue)
+}
+
+// ApplyMovieComplianceWithProgress applies the suggested fix for a compliance issue with progress reporting
+func ApplyMovieComplianceWithProgress(issue ComplianceIssue, progressCh chan<- ScanProgress) error {
+	pr := NewProgressReporterWithInterval(progressCh, "compliance_movies", 200*time.Millisecond)
+	pr.StageUpdate("applying", fmt.Sprintf("Applying compliance fix for: %s", issue.Path))
+	if err := applyMovieComplianceInternal(issue); err != nil {
+		pr.LogError(err, fmt.Sprintf("Failed to apply compliance: %s", issue.Path))
+		return err
+	}
+	pr.SendSeverityImmediate("info", fmt.Sprintf("Fixed compliance for: %s", issue.Path))
+	return nil
+}
+
+// ApplyMovieComplianceWithReporter applies compliance using an existing ProgressReporter (for coordinated updates)
+func ApplyMovieComplianceWithReporter(issue ComplianceIssue, pr *ProgressReporter) error {
+	if pr != nil {
+		pr.StageUpdate("applying", fmt.Sprintf("Applying compliance fix for: %s", issue.Path))
+	}
+	if err := applyMovieComplianceInternal(issue); err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("Failed to apply compliance: %s", issue.Path))
+		}
+		return err
+	}
+	if pr != nil {
+		pr.SendSeverityImmediate("info", fmt.Sprintf("Fixed compliance for: %s", issue.Path))
+	}
+	return nil
+}
+
+func applyMovieComplianceInternal(issue ComplianceIssue) error {
 	if issue.Type != "movie" {
 		return fmt.Errorf("not a movie compliance issue")
 	}
@@ -433,6 +521,39 @@ func ApplyMovieCompliance(issue ComplianceIssue) error {
 // ApplyTVCompliance applies the suggested fix for a TV show compliance issue
 // Checks if Show Name (Year) and Season ## folders exist before creating
 func ApplyTVCompliance(issue ComplianceIssue) error {
+	return applyTVComplianceInternal(issue)
+}
+
+// ApplyTVComplianceWithProgress applies the suggested fix for a TV compliance issue with progress broadcaster
+func ApplyTVComplianceWithProgress(issue ComplianceIssue, progressCh chan<- ScanProgress) error {
+	pr := NewProgressReporterWithInterval(progressCh, "compliance_tv", 200*time.Millisecond)
+	pr.StageUpdate("applying", fmt.Sprintf("Applying TV compliance fix for: %s", issue.Path))
+	if err := applyTVComplianceInternal(issue); err != nil {
+		pr.LogError(err, fmt.Sprintf("Failed to apply TV compliance: %s", issue.Path))
+		return err
+	}
+	pr.SendSeverityImmediate("info", fmt.Sprintf("Fixed compliance for: %s", issue.Path))
+	return nil
+}
+
+// ApplyTVComplianceWithReporter applies TV compliance using an existing ProgressReporter (coordinated updates)
+func ApplyTVComplianceWithReporter(issue ComplianceIssue, pr *ProgressReporter) error {
+	if pr != nil {
+		pr.StageUpdate("applying", fmt.Sprintf("Applying TV compliance fix for: %s", issue.Path))
+	}
+	if err := applyTVComplianceInternal(issue); err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("Failed to apply TV compliance: %s", issue.Path))
+		}
+		return err
+	}
+	if pr != nil {
+		pr.SendSeverityImmediate("info", fmt.Sprintf("Fixed compliance for: %s", issue.Path))
+	}
+	return nil
+}
+
+func applyTVComplianceInternal(issue ComplianceIssue) error {
 	if issue.Type != "tv" {
 		return fmt.Errorf("not a TV compliance issue")
 	}

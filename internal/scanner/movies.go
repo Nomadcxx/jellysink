@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -30,18 +31,42 @@ type MovieFile struct {
 // ScanMovies scans movie library paths for duplicates
 // Returns groups of duplicate movies
 func ScanMovies(paths []string) ([]MovieDuplicate, error) {
+	return ScanMoviesWithProgress(paths, nil)
+}
+
+// ScanMoviesWithProgress scans movie library paths with progress reporting
+func ScanMoviesWithProgress(paths []string, progressCh chan<- ScanProgress) ([]MovieDuplicate, error) {
+	var pr *ProgressReporter
+	if progressCh != nil {
+		pr = NewProgressReporterWithInterval(progressCh, "scanning_movies", 200*time.Millisecond)
+		pr.send(0, "Counting movie files...")
+
+		total, err := CountVideoFiles(paths)
+		if err != nil {
+			return nil, fmt.Errorf("failed to count files: %w", err)
+		}
+		pr.Start(total, fmt.Sprintf("Scanning %d movie files...", total))
+	}
+
 	// Map: normalized_name|year -> []MovieFile
 	movieGroups := make(map[string]*MovieDuplicate)
+	filesProcessed := 0
 
 	for _, libPath := range paths {
 		// Verify path exists
 		if _, err := os.Stat(libPath); err != nil {
+			if pr != nil {
+				pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+			}
 			return nil, fmt.Errorf("library path not accessible: %s: %w", libPath, err)
 		}
 
 		// Walk directory tree
 		err := filepath.Walk(libPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
+				if pr != nil {
+					pr.LogError(err, fmt.Sprintf("Error accessing path during walk: %s", path))
+				}
 				return err
 			}
 
@@ -53,6 +78,11 @@ func ScanMovies(paths []string) ([]MovieDuplicate, error) {
 			// Only process video files
 			if !isVideoFile(path) {
 				return nil
+			}
+
+			filesProcessed++
+			if pr != nil && filesProcessed%10 == 0 {
+				pr.Update(filesProcessed, fmt.Sprintf("Processing: %s", filepath.Base(path)))
 			}
 
 			// Extract movie info from filename/path
@@ -100,6 +130,10 @@ func ScanMovies(paths []string) ([]MovieDuplicate, error) {
 		if len(group.Files) > 1 {
 			duplicates = append(duplicates, *group)
 		}
+	}
+
+	if pr != nil {
+		pr.Complete(fmt.Sprintf("Found %d duplicate groups", len(duplicates)))
 	}
 
 	return duplicates, nil

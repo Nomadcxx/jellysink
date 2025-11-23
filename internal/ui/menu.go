@@ -1438,6 +1438,13 @@ type opState struct {
 	Message    string
 }
 
+type LogLine struct {
+	Timestamp string
+	Operation string
+	Message   string
+	Severity  string // info, warn, error
+}
+
 type ScanningModel struct {
 	config     *config.Config
 	width      int
@@ -1455,7 +1462,7 @@ type ScanningModel struct {
 
 	// Viewport and logs
 	viewport  viewport.Model
-	logBuffer []string // Up to 1000 lines
+	logBuffer []LogLine // Up to 1000 lines with severity
 
 	// Live statistics
 	stats ScanStats
@@ -1464,9 +1471,27 @@ type ScanningModel struct {
 	startTime time.Time
 	eta       time.Duration
 
+	// Alert modal
+	showAlert   bool
+	alertType   string // "error", "critical", "warning"
+	alertMsg    string
+	alertBuffer []string // Recent critical errors for display
+
 	// Keyboard state
 	scrollOffset int
 }
+
+// AlertMessage returns the current alert message (for tests and external packages)
+func (m ScanningModel) AlertMessage() string { return m.alertMsg }
+
+// IsAlertVisible returns whether alert overlay is visible
+func (m ScanningModel) IsAlertVisible() bool { return m.showAlert }
+
+// ClearAlert clears the current alert
+func (m *ScanningModel) ClearAlert() { m.showAlert = false; m.alertMsg = "" }
+
+// SetSize sets the internal width/height used by the model (for testing)
+func (m *ScanningModel) SetSize(width, height int) { m.width = width; m.height = height }
 
 // NewScanningModel creates a new scanning screen
 func NewScanningModel(cfg *config.Config) ScanningModel {
@@ -1480,7 +1505,7 @@ func NewScanningModel(cfg *config.Config) ScanningModel {
 		opStates:        make(map[string]opState),
 		opOrder:         []string{},
 		viewport:        viewport.Model{},
-		logBuffer:       []string{},
+		logBuffer:       []LogLine{},
 		stats:           ScanStats{},
 		startTime:       time.Now(),
 		eta:             0,
@@ -1500,7 +1525,21 @@ func (m ScanningModel) waitForProgress() tea.Msg {
 }
 
 func (m ScanningModel) renderLogs() string {
-	return strings.Join(m.logBuffer, "\n")
+	var lines []string
+	for _, l := range m.logBuffer {
+		raw := fmt.Sprintf("%s %s [%s] %s", l.Timestamp, l.Operation, strings.ToUpper(l.Severity), l.Message)
+		var styled string
+		switch l.Severity {
+		case "error":
+			styled = ErrorStyle.Render(raw)
+		case "warn":
+			styled = WarningStyle.Render(raw)
+		default:
+			styled = MutedStyle.Render(raw)
+		}
+		lines = append(lines, styled)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runScan executes the scan in background
@@ -1514,6 +1553,21 @@ func (m ScanningModel) runScan() tea.Msg {
 func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// If alert is showing, only handle dismissal
+		if m.showAlert {
+			switch msg.String() {
+			case "enter", "esc", " ":
+				m.showAlert = false
+				m.alertMsg = ""
+				return m, nil
+			case "ctrl+c":
+				m.cancel()
+				close(m.progressCh)
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c":
 			m.cancel()
@@ -1582,6 +1636,17 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle alert requests
+		if msg.ShowAlert {
+			m.showAlert = true
+			m.alertType = msg.AlertType
+			m.alertMsg = msg.Message
+			m.alertBuffer = append(m.alertBuffer, msg.Message)
+			if len(m.alertBuffer) > 10 {
+				m.alertBuffer = m.alertBuffer[len(m.alertBuffer)-10:]
+			}
+		}
+
 		// Update operation state
 		op := msg.Operation
 		st := opState{
@@ -1596,11 +1661,13 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.opStates[op] = st
 
 		// Add to log buffer (max 1000 lines)
-		logEntry := fmt.Sprintf("[%02d:%02d] [%s] %s",
-			msg.ElapsedSeconds/60,
-			msg.ElapsedSeconds%60,
-			msg.Operation,
-			msg.Message)
+		// Build structured log entry
+		logEntry := LogLine{
+			Timestamp: fmt.Sprintf("%02d:%02d", msg.ElapsedSeconds/60, msg.ElapsedSeconds%60),
+			Operation: msg.Operation,
+			Message:   msg.Message,
+			Severity:  msg.Severity,
+		}
 
 		m.logBuffer = append(m.logBuffer, logEntry)
 		if len(m.logBuffer) > 1000 {
@@ -1661,6 +1728,44 @@ func (m ScanningModel) View() string {
 		Width(m.width - 8)
 	content.WriteString(progressHeaderStyle.Render("SCANNING LIBRARIES"))
 	content.WriteString("\n\n")
+
+	// Operation stages
+	if len(m.opOrder) > 0 {
+		stageHeader := lipgloss.NewStyle().Bold(true).Foreground(ColorInfo).Align(lipgloss.Center).Width(m.width - 8)
+		content.WriteString(stageHeader.Render("Progress by operation"))
+		content.WriteString("\n\n")
+		// Render each operation status horizontally
+		var ops []string
+		for _, op := range m.opOrder {
+			st := m.opStates[op]
+			label := op
+			switch op {
+			case "scanning_movies":
+				label = "Movies (duplicates)"
+			case "scanning_tv":
+				label = "TV (duplicates)"
+			case "compliance_movies":
+				label = "Movies (compliance)"
+			case "compliance_tv":
+				label = "TV (compliance)"
+			case "generating_report":
+				label = "Report"
+			}
+			// Determine marker
+			marker := MutedStyle.Render("[ ]")
+			if st.Stage == "complete" || st.Percentage >= 100.0 {
+				marker = SuccessStyle.Render("[✓]")
+			} else if st.Stage == "scanning" || st.Stage == "analyzing" {
+				marker = InfoStyle.Render("[→]")
+			} else if st.Stage == "counting_files" {
+				marker = MutedStyle.Render("[…]")
+			}
+			percentText := fmt.Sprintf("%.0f%%", st.Percentage)
+			ops = append(ops, fmt.Sprintf("%s %s %s", marker, label, percentText))
+		}
+		content.WriteString(strings.Join(ops, "  |  "))
+		content.WriteString("\n\n")
+	}
 
 	// Current phase
 	if m.currentProgress.Message != "" {
@@ -1740,7 +1845,80 @@ func (m ScanningModel) View() string {
 		Padding(1, 2).
 		Width(m.width)
 
-	return mainStyle.Render(content.String())
+	renderedContent := mainStyle.Render(content.String())
+
+	// Overlay alert modal if active
+	if m.showAlert {
+		return m.renderAlertOverlay(renderedContent)
+	}
+
+	return renderedContent
+}
+
+// renderAlertOverlay renders a modal alert over the main content
+func (m ScanningModel) renderAlertOverlay(_ string) string {
+	// Determine alert styling based on type
+	var titleStyle lipgloss.Style
+	var borderColor lipgloss.Color
+	var title string
+
+	switch m.alertType {
+	case "critical":
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")).Align(lipgloss.Center)
+		borderColor = lipgloss.Color("9")
+		title = "⚠ CRITICAL ERROR ⚠"
+	case "error":
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorError).Align(lipgloss.Center)
+		borderColor = ColorError
+		title = "ERROR"
+	case "warning":
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorWarning).Align(lipgloss.Center)
+		borderColor = ColorWarning
+		title = "WARNING"
+	default:
+		titleStyle = lipgloss.NewStyle().Bold(true).Foreground(ColorInfo).Align(lipgloss.Center)
+		borderColor = ColorInfo
+		title = "ALERT"
+	}
+
+	// Build modal content
+	var modalContent strings.Builder
+	modalContent.WriteString(titleStyle.Render(title))
+	modalContent.WriteString("\n\n")
+
+	// Message
+	msgStyle := lipgloss.NewStyle().Foreground(RAMAForeground).Width(60).Align(lipgloss.Left)
+	modalContent.WriteString(msgStyle.Render(m.alertMsg))
+	modalContent.WriteString("\n\n")
+
+	// Recent errors count if multiple
+	if len(m.alertBuffer) > 1 {
+		countStyle := lipgloss.NewStyle().Foreground(RAMAMuted).Align(lipgloss.Center).Width(60)
+		modalContent.WriteString(countStyle.Render(fmt.Sprintf("(%d errors recorded)", len(m.alertBuffer))))
+		modalContent.WriteString("\n\n")
+	}
+
+	// Instructions
+	instructionStyle := lipgloss.NewStyle().Foreground(RAMAMuted).Align(lipgloss.Center).Width(60)
+	modalContent.WriteString(instructionStyle.Render("Press Enter/Esc/Space to dismiss"))
+
+	// Wrap in bordered box
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.ThickBorder()).
+		BorderForeground(borderColor).
+		Padding(1, 2).
+		Width(64).
+		Align(lipgloss.Center)
+
+	modal := modalStyle.Render(modalContent.String())
+
+	// Center the modal overlay on screen
+	overlayStyle := lipgloss.NewStyle().
+		Align(lipgloss.Center, lipgloss.Center).
+		Width(m.width).
+		Height(m.height)
+
+	return overlayStyle.Render(modal)
 }
 
 // APIConfigModel handles API key configuration
