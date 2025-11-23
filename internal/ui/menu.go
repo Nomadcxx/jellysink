@@ -18,6 +18,7 @@ import (
 	"github.com/Nomadcxx/jellysink/internal/config"
 	"github.com/Nomadcxx/jellysink/internal/daemon"
 	"github.com/Nomadcxx/jellysink/internal/reporter"
+	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
 
 // MenuItem represents a menu option
@@ -1423,41 +1424,89 @@ func (m ListLibrariesModel) View() string {
 }
 
 // ScanningModel shows a loading screen while scan is running
+type ScanStats struct {
+	FilesProcessed    int
+	DuplicatesFound   int
+	ComplianceIssues  int
+	ErrorsEncountered int
+}
+
+type opState struct {
+	Operation  string
+	Stage      string
+	Percentage float64
+	Message    string
+}
+
 type ScanningModel struct {
-	config       *config.Config
-	width        int
-	height       int
-	ctx          context.Context
-	cancel       context.CancelFunc
-	progress     float64 // 0.0 to 1.0
-	currentPhase string
+	config     *config.Config
+	width      int
+	height     int
+	ctx        context.Context
+	cancel     context.CancelFunc
+	progressCh chan scanner.ScanProgress
+
+	// Full progress state - last received
+	currentProgress scanner.ScanProgress
+
+	// Per-operation stage/status
+	opStates map[string]opState
+	opOrder  []string
+
+	// Viewport and logs
+	viewport  viewport.Model
+	logBuffer []string // Up to 1000 lines
+
+	// Live statistics
+	stats ScanStats
+
+	// ETA and timing
+	startTime time.Time
+	eta       time.Duration
+
+	// Keyboard state
+	scrollOffset int
 }
 
 // NewScanningModel creates a new scanning screen
 func NewScanningModel(cfg *config.Config) ScanningModel {
 	ctx, cancel := context.WithCancel(context.Background())
 	return ScanningModel{
-		config: cfg,
-		ctx:    ctx,
-		cancel: cancel,
+		config:          cfg,
+		ctx:             ctx,
+		cancel:          cancel,
+		progressCh:      make(chan scanner.ScanProgress, 100),
+		currentProgress: scanner.ScanProgress{},
+		opStates:        make(map[string]opState),
+		opOrder:         []string{},
+		viewport:        viewport.Model{},
+		logBuffer:       []string{},
+		stats:           ScanStats{},
+		startTime:       time.Now(),
+		eta:             0,
+		scrollOffset:    0,
 	}
 }
 
 // Init starts the scan
 func (m ScanningModel) Init() tea.Cmd {
-	return tea.Batch(m.runScan, m.tickProgress)
+	return tea.Batch(m.runScan, m.waitForProgress)
 }
 
-// tickProgress updates progress periodically
-func (m ScanningModel) tickProgress() tea.Msg {
-	time.Sleep(200 * time.Millisecond)
-	return progressTickMsg{}
+// waitForProgress listens for progress updates
+func (m ScanningModel) waitForProgress() tea.Msg {
+	progress := <-m.progressCh
+	return progress
+}
+
+func (m ScanningModel) renderLogs() string {
+	return strings.Join(m.logBuffer, "\n")
 }
 
 // runScan executes the scan in background
 func (m ScanningModel) runScan() tea.Msg {
 	d := daemon.New(m.config)
-	reportPath, err := d.RunScan(m.ctx)
+	reportPath, err := d.RunScanWithProgress(m.ctx, m.progressCh)
 	return scanStatusMsg{reportPath: reportPath, err: err}
 }
 
@@ -1468,39 +1517,101 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			m.cancel()
+			close(m.progressCh)
 			return m, tea.Quit
+		case "up", "k":
+			m.viewport, _ = m.viewport.Update(msg)
+			return m, nil
+		case "down", "j":
+			m.viewport, _ = m.viewport.Update(msg)
+			return m, nil
+		case "pgup":
+			m.viewport, _ = m.viewport.Update(msg)
+			return m, nil
+		case "pgdown":
+			m.viewport, _ = m.viewport.Update(msg)
+			return m, nil
+
 		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		// Initialize or resize viewport for logs
+		headerHeight := 10 // ASCII header + progress area
+		footerHeight := 4  // Help/footer
+		vpWidth := msg.Width - 4
+		vpHeight := msg.Height - headerHeight - footerHeight
+		if vpHeight < 4 {
+			vpHeight = 4
+		}
+		if m.viewport.Width == 0 || m.viewport.Height == 0 {
+			m.viewport = viewport.New(vpWidth, vpHeight)
+			m.viewport.Style = lipgloss.NewStyle().Padding(0, 1)
+			m.viewport.SetContent(m.renderLogs())
+		} else {
+			m.viewport.Width = vpWidth
+			m.viewport.Height = vpHeight
+		}
+		m.viewport.SetContent(m.renderLogs())
 		return m, nil
 
-	case progressTickMsg:
-		// Update progress (simulate with incremental progress)
-		if m.progress < 0.95 {
-			m.progress += 0.02 // Increment by 2%
-			if m.progress < 0.25 {
-				m.currentPhase = "Scanning movie libraries..."
-			} else if m.progress < 0.5 {
-				m.currentPhase = "Scanning TV show libraries..."
-			} else if m.progress < 0.7 {
-				m.currentPhase = "Checking naming compliance..."
-			} else if m.progress < 0.9 {
-				m.currentPhase = "Analyzing duplicates..."
-			} else {
-				m.currentPhase = "Generating report..."
+	case scanner.ScanProgress:
+		// Real progress update received
+		m.currentProgress = msg
+
+		// Update live stats
+		m.stats.FilesProcessed = msg.FilesProcessed
+		m.stats.DuplicatesFound = msg.DuplicatesFound
+		m.stats.ComplianceIssues = msg.ComplianceIssues
+
+		// Start time: prefer progress StartTime if provided
+		if m.startTime.IsZero() && !msg.StartTime.IsZero() {
+			m.startTime = msg.StartTime
+		}
+
+		// Calculate ETA
+		if msg.Total > 0 && msg.Current > 0 {
+			elapsed := time.Since(m.startTime)
+			rate := float64(msg.Current) / elapsed.Seconds()
+			remaining := msg.Total - msg.Current
+			if rate > 0 {
+				m.eta = time.Duration(float64(remaining)/rate) * time.Second
 			}
 		}
-		return m, m.tickProgress
+
+		// Add to log buffer (max 1000 lines)
+		logEntry := fmt.Sprintf("[%02d:%02d] [%s] %s",
+			msg.ElapsedSeconds/60,
+			msg.ElapsedSeconds%60,
+			msg.Operation,
+			msg.Message)
+
+		m.logBuffer = append(m.logBuffer, logEntry)
+		if len(m.logBuffer) > 1000 {
+			m.logBuffer = m.logBuffer[len(m.logBuffer)-1000:]
+		}
+
+		// Update viewport content and auto-scroll if available
+		if m.viewport.Width > 0 && m.viewport.Height > 0 {
+			m.viewport.SetContent(m.renderLogs())
+			// Auto-scroll to bottom when new message arrives
+			m.viewport.GotoBottom()
+		}
+
+		// Continue waiting for more progress
+		return m, m.waitForProgress
 
 	case scanStatusMsg:
 		// Scan completed - switch to report view
 		if msg.err != nil {
+			close(m.progressCh)
 			return m, tea.Printf("Scan failed: %v", msg.err)
 		}
 
 		// Load report and switch to report view
+		close(m.progressCh)
 		report, err := loadReportJSON(msg.reportPath)
 		if err != nil {
 			return m, tea.Printf("Failed to load report: %v", err)
@@ -1538,36 +1649,82 @@ func (m ScanningModel) View() string {
 	content.WriteString("\n\n")
 
 	// Current phase
-	if m.currentPhase != "" {
+	if m.currentProgress.Message != "" {
 		phaseStyle := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(ColorInfo).
 			Align(lipgloss.Center).
 			Width(m.width - 8)
-		content.WriteString(phaseStyle.Render(m.currentPhase))
+		content.WriteString(phaseStyle.Render(m.currentProgress.Message))
 		content.WriteString("\n\n")
 	}
 
 	// Progress bar (50 characters wide)
-	progress := int(m.progress * 50)
-	if progress > 50 {
-		progress = 50
+	barWidth := int(m.currentProgress.Percentage * 50 / 100)
+	if barWidth > 50 {
+		barWidth = 50
 	}
-	progressBar := strings.Repeat("█", progress) + strings.Repeat("░", 50-progress)
+	if barWidth < 0 {
+		barWidth = 0
+	}
+	progressBar := strings.Repeat("█", barWidth) + strings.Repeat("░", 50-barWidth)
 	progressBarStyle := lipgloss.NewStyle().
 		Foreground(RAMARed).
 		Align(lipgloss.Center).
 		Width(m.width - 8)
-	content.WriteString(progressBarStyle.Render(fmt.Sprintf("[%s] %.1f%%", progressBar, m.progress*100)))
+	content.WriteString(progressBarStyle.Render(fmt.Sprintf("[%s] %.1f%%", progressBar, m.currentProgress.Percentage)))
 	content.WriteString("\n\n")
 
-	// Help text
-	content.WriteString(MutedStyle.Render("Press Ctrl+C to cancel") + "\n")
+	// Live statistics
+	statsStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(RAMARed).
+		Padding(0, 2).
+		Width(m.width - 10)
+	statsContent := fmt.Sprintf(
+		"Files Processed: %d  |  Duplicates: %d  |  Compliance Issues: %d  |  Errors: %d",
+		m.stats.FilesProcessed,
+		m.stats.DuplicatesFound,
+		m.stats.ComplianceIssues,
+		m.stats.ErrorsEncountered,
+	)
+	content.WriteString(statsStyle.Render(statsContent))
+	content.WriteString("\n\n")
 
-	// Wrap in centered style
+	// ETA display
+	if m.eta > 0 {
+		etaStyle := lipgloss.NewStyle().
+			Foreground(ColorInfo).
+			Align(lipgloss.Center).
+			Width(m.width - 8)
+		etaText := fmt.Sprintf("Estimated Time Remaining: %s", m.eta.Round(time.Second))
+		content.WriteString(etaStyle.Render(etaText))
+		content.WriteString("\n\n")
+	}
+
+	// Scrolling log viewport
+	logTitleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(ColorInfo)
+
+	content.WriteString(logTitleStyle.Render("Activity Log:"))
+	content.WriteString("\n")
+	content.WriteString(m.viewport.View())
+	content.WriteString("\n")
+
+	// Help text
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("240")).
+		Align(lipgloss.Center).
+		Width(m.width - 8)
+
+	helpText := "↑/↓: Scroll logs  •  PgUp/PgDn: Page scroll  •  Ctrl+C: Cancel"
+	content.WriteString(helpStyle.Render(helpText))
+
+	// Wrap in main container
 	mainStyle := lipgloss.NewStyle().
 		Padding(1, 2).
-		Width(m.width - 4)
+		Width(m.width)
 
 	return mainStyle.Render(content.String())
 }
