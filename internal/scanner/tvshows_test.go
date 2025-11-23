@@ -3,6 +3,7 @@ package scanner
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -277,6 +278,64 @@ func TestTVShowAbbreviationPreservation(t *testing.T) {
 			result := CleanMovieName(tt.input)
 			if result != tt.expected {
 				t.Errorf("CleanMovieName(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestExtractShowNameFromPath_ReleaseGroupFolders tests show name extraction
+// from various folder structures (Jellyfin-compliant and non-compliant)
+func TestExtractShowNameFromPath_ReleaseGroupFolders(t *testing.T) {
+	tests := []struct {
+		name          string
+		path          string
+		expectedShow  string // Expected show name after extraction
+		shouldContain string // Substring that must be in result
+	}{
+		{
+			name:          "Merlin - Release group folder (flat, no Season folder)",
+			path:          "/mnt/STORAGE5/TVSHOWS/Merlin.2008.S01.Bluray.EAC3.2.0.1080p.x265-iVy/Merlin.S01E01.The.Dragon's.Call.EAC3.2.0.1080p.Bluray.x265-iVy.mkv",
+			expectedShow:  "Merlin",
+			shouldContain: "merlin",
+		},
+		{
+			name:          "The Mighty Nein - Release group folder",
+			path:          "/mnt/STORAGE5/TVSHOWS/The.Mighty.Nein.S01E01.Mote.of.Possibility.720p.AMZN.WEB-DL.DDP5.1.H.264-playWEB/The.Mighty.Nein.S01E01.Mote.of.Possibility.720p.AMZN.WEB-DL.DDP5.1.H.264-playWEB.mkv",
+			expectedShow:  "The Mighty Nein",
+			shouldContain: "mighty",
+		},
+		{
+			name:          "IT Welcome to Derry - Release group folder",
+			path:          "/mnt/STORAGE5/TVSHOWS/IT.Welcome.to.Derry.S01E02.The.Thing.in.the.Dark.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb/IT.Welcome.to.Derry.S01E02.The.Thing.in.the.Dark.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb.mkv",
+			expectedShow:  "IT Welcome To Derry",
+			shouldContain: "welcome",
+		},
+		{
+			name:          "Jellyfin-compliant structure with Season folder",
+			path:          "/mnt/STORAGE1/TVSHOWS/Breaking Bad (2008)/Season 01/Breaking Bad (2008) S01E01.mkv",
+			expectedShow:  "Breaking Bad",
+			shouldContain: "breaking",
+		},
+		{
+			name:          "Different show in Season folder",
+			path:          "/mnt/STORAGE1/TVSHOWS/Game of Thrones (2011)/Season 03/Game.of.Thrones.S03E09.1080p.mkv",
+			expectedShow:  "Game Of Thrones",
+			shouldContain: "thrones",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractShowNameFromPath(tt.path)
+			t.Logf("Path: %s", tt.path)
+			t.Logf("  -> Extracted: '%s'", result)
+			t.Logf("  -> Normalized: '%s'", NormalizeName(result))
+
+			// Verify the result contains the expected substring
+			normalized := strings.ToLower(NormalizeName(result))
+			if !strings.Contains(normalized, tt.shouldContain) {
+				t.Errorf("Expected show name to contain '%s', got: '%s' (normalized: '%s')",
+					tt.shouldContain, result, normalized)
 			}
 		})
 	}

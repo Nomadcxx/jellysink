@@ -39,9 +39,9 @@ func ScanMoviesWithProgress(paths []string, progressCh chan<- ScanProgress) ([]M
 	var pr *ProgressReporter
 	if progressCh != nil {
 		pr = NewProgressReporterWithInterval(progressCh, "scanning_movies", 200*time.Millisecond)
-		pr.send(0, "Counting movie files...")
+		pr.StageUpdate("counting_files", "Counting movie files...")
 
-		total, err := CountVideoFiles(paths)
+		total, err := CountVideoFilesWithProgress(paths, pr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to count files: %w", err)
 		}
@@ -81,7 +81,7 @@ func ScanMoviesWithProgress(paths []string, progressCh chan<- ScanProgress) ([]M
 			}
 
 			filesProcessed++
-			if pr != nil && filesProcessed%10 == 0 {
+			if pr != nil && filesProcessed%5 == 0 {
 				pr.Update(filesProcessed, fmt.Sprintf("Processing: %s", filepath.Base(path)))
 			}
 

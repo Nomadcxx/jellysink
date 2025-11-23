@@ -5,13 +5,58 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
+
+// APICache stores API verification results for the current session
+type APICache struct {
+	mu    sync.RWMutex
+	cache map[string]*APICacheEntry
+}
+
+// APICacheEntry represents a cached API lookup result
+type APICacheEntry struct {
+	Title      string
+	Year       string
+	Verified   bool
+	Confidence float64
+	Reason     string
+	Timestamp  time.Time
+}
+
+// Global cache for API lookups (session-scoped)
+var globalAPICache = &APICache{
+	cache: make(map[string]*APICacheEntry),
+}
+
+// Get retrieves a cached entry
+func (c *APICache) Get(key string) (*APICacheEntry, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entry, ok := c.cache[key]
+	return entry, ok
+}
+
+// Set stores a cache entry
+func (c *APICache) Set(key string, entry *APICacheEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache[key] = entry
+}
+
+// Clear removes all cache entries
+func (c *APICache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cache = make(map[string]*APICacheEntry)
+}
 
 // TVTitleMatch represents a potential title match with confidence score
 type TVTitleMatch struct {
@@ -20,6 +65,17 @@ type TVTitleMatch struct {
 	Confidence float64 // 0.0 to 1.0 (higher = more confident)
 	Year       string  // Extracted year if present
 }
+
+// DecisionType represents user's resolution choice
+type DecisionType int
+
+const (
+	DecisionNone DecisionType = iota
+	DecisionFolderTitle
+	DecisionFilenameTitle
+	DecisionCustomTitle
+	DecisionSkipped
+)
 
 // TVTitleResolution contains the resolved show name and metadata
 type TVTitleResolution struct {
@@ -30,6 +86,11 @@ type TVTitleResolution struct {
 	Confidence    float64       // Overall confidence (0.0 to 1.0)
 	APIVerified   bool          // True if verified via TVDB/OMDB
 	Reason        string        // Explanation for resolution choice
+
+	UserDecision  DecisionType // User's choice
+	CustomTitle   string       // Custom title if DecisionCustomTitle
+	AffectedFiles []string     // List of file paths affected by this resolution
+	FolderPath    string       // Root folder for this show
 }
 
 // ExtractTVShowTitle extracts show title from folder or filename
@@ -195,24 +256,63 @@ func ResolveTVShowTitle(filePath, libRoot string) *TVTitleResolution {
 		return resolution
 	}
 
-	// Case 2: Filename title is significantly longer - check if it's just episode title appended
-	if len(filenameTitle) > len(folderTitle)+5 {
+	// Case 2: Check if one is a prefix/substring of the other (common case)
+	folderLower := strings.ToLower(folderTitle)
+	filenameLower := strings.ToLower(filenameTitle)
+
+	// Check if filename is just a word from the folder (e.g., "Star" from "Star Trek")
+	// This is a very common false positive - prefer the folder
+	if len(filenameTitle) < len(folderTitle) {
+		folderWords := strings.Fields(folderLower)
+		// Check if filename is exactly one of the folder words
+		for _, word := range folderWords {
+			if filenameLower == word && len(filenameTitle) < len(folderTitle)-2 {
+				// Filename is just a word from folder - use folder (not ambiguous!)
+				resolution.ResolvedTitle = folderTitle
+				resolution.Confidence = folderMatch.Confidence
+				resolution.IsAmbiguous = false
+				resolution.Reason = "Filename is incomplete fragment of folder title"
+				return resolution
+			}
+		}
+	}
+
+	// Check if folder contains filename as prefix (e.g., "Last Week Tonight" vs "Last Week Tonight With John Oliver")
+	if strings.HasPrefix(folderLower, filenameLower) && len(folderLower) > len(filenameLower)+1 {
+		// Folder has more info - check if it's just adding common suffixes
+		extraText := strings.TrimSpace(folderTitle[len(filenameTitle):])
+		// Common show subtitle patterns that are legitimate
+		if strings.HasPrefix(strings.ToLower(extraText), "with ") ||
+			strings.HasPrefix(strings.ToLower(extraText), "the ") ||
+			looksLikeShowSubtitle(extraText) {
+			// Folder has legitimate show subtitle - use folder (not ambiguous!)
+			resolution.ResolvedTitle = folderTitle
+			resolution.Confidence = folderMatch.Confidence
+			resolution.IsAmbiguous = false
+			resolution.Reason = "Folder contains complete show title with host/subtitle"
+			return resolution
+		}
+	}
+
+	// Case 3: Filename title is significantly longer - check if it's a show subtitle or just episode title
+	// Use percentage-based threshold, but cap it for short titles
+	lengthDiffThreshold := len(folderTitle) * 30 / 100
+	if lengthDiffThreshold < 5 {
+		lengthDiffThreshold = 5 // Lower minimum for short titles
+	}
+
+	if len(filenameTitle) > len(folderTitle)+lengthDiffThreshold {
 		// Special case: Very short folder names (< 5 chars) are likely truncated/abbreviated
 		// Always mark as ambiguous and prefer the longer filename
 		if len(folderTitle) < 5 {
 			resolution.ResolvedTitle = filenameTitle
 			resolution.Confidence = filenameMatch.Confidence * 0.8
 			resolution.IsAmbiguous = true
-			resolution.Reason = fmt.Sprintf("Filename has longer title (%d chars vs %d chars)", len(filenameTitle), len(folderTitle))
+			resolution.Reason = "Folder title is very short, filename provides more complete title"
 			return resolution
 		}
 
 		// Check if filename starts with folder title followed by a word boundary
-		// This handles: "A Place To Call Home" (folder) vs "A Place To Call Home The Prodigal Daughter" (filename)
-		// But NOT: "Degrassi" vs "Degrassi The Next Generation" (show subtitle, should be ambiguous)
-		folderLower := strings.ToLower(folderTitle)
-		filenameLower := strings.ToLower(filenameTitle)
-
 		if strings.HasPrefix(filenameLower, folderLower) {
 			// Check if there's a space after the folder title (word boundary)
 			if len(filenameLower) > len(folderLower) && filenameLower[len(folderLower)] == ' ' {
@@ -220,18 +320,16 @@ func ResolveTVShowTitle(filePath, libRoot string) *TVTitleResolution {
 				extraText := filenameTitle[len(folderTitle)+1:] // +1 to skip the space
 
 				// Check if extra text looks like a show subtitle (e.g., "The Next Generation")
-				// If yes, mark as ambiguous (user should confirm)
-				// If no, it's likely an episode title that wasn't stripped
 				if looksLikeShowSubtitle(extraText) {
 					// Likely a show subtitle - mark ambiguous, prefer filename (longer/more complete)
 					resolution.ResolvedTitle = filenameTitle
 					resolution.Confidence = filenameMatch.Confidence * 0.8
 					resolution.IsAmbiguous = true
-					resolution.Reason = fmt.Sprintf("Filename has longer title (%d chars vs %d chars)", len(filenameTitle), len(folderTitle))
+					resolution.Reason = "Filename contains show subtitle not in folder name"
 					return resolution
 				}
 
-				// Extra text is episode title, use folder title
+				// Extra text is likely episode title that wasn't stripped, use folder title
 				resolution.ResolvedTitle = folderTitle
 				resolution.Confidence = folderMatch.Confidence
 				resolution.IsAmbiguous = false
@@ -240,24 +338,44 @@ func ResolveTVShowTitle(filePath, libRoot string) *TVTitleResolution {
 			}
 		}
 
-		// Filename has different/longer title (not just appended episode name)
+		// Filename has substantially different/longer title
 		resolution.ResolvedTitle = filenameTitle
-		resolution.Confidence = filenameMatch.Confidence * 0.8 // Reduce confidence slightly
+		resolution.Confidence = filenameMatch.Confidence * 0.8
 		resolution.IsAmbiguous = true
-		resolution.Reason = fmt.Sprintf("Filename has longer title (%d chars vs %d chars)", len(filenameTitle), len(folderTitle))
+		resolution.Reason = "Filename has significantly longer title"
 		return resolution
 	}
 
-	// Case 3: Folder title is longer (use folder, but mark ambiguous)
-	if len(folderTitle) > len(filenameTitle)+5 {
+	// Case 4: Folder title is significantly longer
+	// Use same threshold approach as Case 3
+	lengthDiffThresholdForFolder := len(filenameTitle) * 30 / 100
+	if lengthDiffThresholdForFolder < 5 {
+		lengthDiffThresholdForFolder = 5
+	}
+
+	if len(folderTitle) > len(filenameTitle)+lengthDiffThresholdForFolder {
 		resolution.ResolvedTitle = folderTitle
-		resolution.Confidence = folderMatch.Confidence * 0.8
+		resolution.Confidence = folderMatch.Confidence * 0.85
 		resolution.IsAmbiguous = true
-		resolution.Reason = fmt.Sprintf("Folder has longer title (%d chars vs %d chars)", len(folderTitle), len(filenameTitle))
+		resolution.Reason = "Folder has significantly longer title than filename"
 		return resolution
 	}
 
-	// Case 4: Titles differ but similar length - ambiguous, needs API verification
+	// Case 5: Titles differ but similar length
+	// Check if they're very similar (minor differences like "and" vs "&")
+	normalizedFolder := strings.ToLower(strings.ReplaceAll(folderTitle, " ", ""))
+	normalizedFilename := strings.ToLower(strings.ReplaceAll(filenameTitle, " ", ""))
+
+	// If normalized versions are the same, use folder title (more official)
+	if normalizedFolder == normalizedFilename {
+		resolution.ResolvedTitle = folderTitle
+		resolution.Confidence = folderMatch.Confidence
+		resolution.IsAmbiguous = false
+		resolution.Reason = "Titles are essentially the same (minor formatting differences)"
+		return resolution
+	}
+
+	// Titles genuinely differ - mark as ambiguous for API verification
 	resolution.ResolvedTitle = folderTitle // Default to folder
 	resolution.Confidence = 0.5            // Low confidence
 	resolution.IsAmbiguous = true
@@ -269,6 +387,11 @@ func ResolveTVShowTitle(filePath, libRoot string) *TVTitleResolution {
 // calculateTitleConfidence estimates how confident we are in the extracted title
 func calculateTitleConfidence(title, original string) float64 {
 	confidence := 1.0
+
+	// Major penalty for garbage titles (release group artifacts)
+	if IsGarbageTitle(title) {
+		confidence -= 0.8
+	}
 
 	// Penalty for very short titles (likely truncated)
 	if len(title) < 3 {
@@ -314,6 +437,11 @@ func GetAmbiguousTVShows(resolutions []*TVTitleResolution) []*TVTitleResolution 
 		}
 	}
 	return ambiguous
+}
+
+// ClearAPICache clears the session API cache
+func ClearAPICache() {
+	globalAPICache.Clear()
 }
 
 // TVDBSearchResult represents a search result from TVDB API
@@ -410,47 +538,105 @@ func (c *TVDBClient) Login() error {
 	return nil
 }
 
-// SearchSeries searches TVDB for a series by name
+// SearchSeries searches TVDB for a series by name with retry logic
 func (c *TVDBClient) SearchSeries(name string) ([]TVDBSeries, error) {
+	return c.SearchSeriesWithRetry(name, 3)
+}
+
+// SearchSeriesWithRetry searches TVDB with configurable retry count
+func (c *TVDBClient) SearchSeriesWithRetry(name string, maxRetries int) ([]TVDBSeries, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("TVDB API key not configured")
 	}
 
-	// Login to get token if we don't have one
-	if c.Token == "" {
-		if err := c.Login(); err != nil {
-			return nil, fmt.Errorf("failed to authenticate: %w", err)
+	cacheKey := "tvdb:" + name
+	if cached, ok := globalAPICache.Get(cacheKey); ok {
+		if cached.Verified {
+			return []TVDBSeries{{Name: cached.Title, Year: cached.Year}}, nil
 		}
+		return nil, fmt.Errorf("cached: %s", cached.Reason)
 	}
 
-	encodedName := url.QueryEscape(name)
-	apiURL := fmt.Sprintf("https://api4.thetvdb.com/v4/search?query=%s&type=series", encodedName)
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			time.Sleep(backoff)
+		}
 
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		if c.Token == "" {
+			if err := c.Login(); err != nil {
+				lastErr = fmt.Errorf("failed to authenticate: %w", err)
+				continue
+			}
+		}
+
+		encodedName := url.QueryEscape(name)
+		apiURL := fmt.Sprintf("https://api4.thetvdb.com/v4/search?query=%s&type=series", encodedName)
+
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request: %w", err)
+			continue
+		}
+
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("API request failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			c.Token = ""
+			resp.Body.Close()
+			lastErr = fmt.Errorf("authentication expired, retrying")
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("rate limited")
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		var result TVDBSearchResult
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("failed to parse response: %w", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if len(result.Data) > 0 {
+			globalAPICache.Set(cacheKey, &APICacheEntry{
+				Title:      result.Data[0].Name,
+				Year:       result.Data[0].Year,
+				Verified:   true,
+				Confidence: 0.95,
+				Timestamp:  time.Now(),
+			})
+		}
+
+		return result.Data, nil
 	}
 
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/json")
+	globalAPICache.Set(cacheKey, &APICacheEntry{
+		Verified:  false,
+		Reason:    lastErr.Error(),
+		Timestamp: time.Now(),
+	})
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result TVDBSearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	return result.Data, nil
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // OMDBClient handles OMDB API requests
@@ -478,43 +664,98 @@ func NewOMDBClient(apiKey string) *OMDBClient {
 	}
 }
 
-// SearchSeries searches OMDB for a series by name
+// SearchSeries searches OMDB for a series by name with retry logic
 func (c *OMDBClient) SearchSeries(name string) (*OMDBSeries, error) {
+	return c.SearchSeriesWithRetry(name, 3)
+}
+
+// SearchSeriesWithRetry searches OMDB with configurable retry count
+func (c *OMDBClient) SearchSeriesWithRetry(name string, maxRetries int) (*OMDBSeries, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("OMDB API key not configured")
 	}
 
-	encodedName := url.QueryEscape(name)
-	apiURL := fmt.Sprintf("https://www.omdbapi.com/?t=%s&type=series&apikey=%s", encodedName, c.APIKey)
-
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	cacheKey := "omdb:" + name
+	if cached, ok := globalAPICache.Get(cacheKey); ok {
+		if cached.Verified {
+			return &OMDBSeries{Title: cached.Title, Year: cached.Year}, nil
+		}
+		return nil, fmt.Errorf("cached: %s", cached.Reason)
 	}
 
-	req.Header.Set("Accept", "application/json")
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(math.Pow(2, float64(attempt-1))) * time.Second
+			time.Sleep(backoff)
+		}
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("API request failed: %w", err)
+		encodedName := url.QueryEscape(name)
+		apiURL := fmt.Sprintf("https://www.omdbapi.com/?t=%s&type=series&apikey=%s", encodedName, c.APIKey)
+
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to create request: %w", err)
+			continue
+		}
+
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("API request failed: %w", err)
+			continue
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("rate limited")
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
+			continue
+		}
+
+		var result OMDBSeries
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("failed to parse response: %w", err)
+			continue
+		}
+		resp.Body.Close()
+
+		if result.Error != "" {
+			lastErr = fmt.Errorf("OMDB error: %s", result.Error)
+			globalAPICache.Set(cacheKey, &APICacheEntry{
+				Verified:  false,
+				Reason:    result.Error,
+				Timestamp: time.Now(),
+			})
+			return nil, lastErr
+		}
+
+		globalAPICache.Set(cacheKey, &APICacheEntry{
+			Title:      result.Title,
+			Year:       result.Year,
+			Verified:   true,
+			Confidence: 0.90,
+			Timestamp:  time.Now(),
+		})
+
+		return &result, nil
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(body))
-	}
+	globalAPICache.Set(cacheKey, &APICacheEntry{
+		Verified:  false,
+		Reason:    lastErr.Error(),
+		Timestamp: time.Now(),
+	})
 
-	var result OMDBSeries
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
-	}
-
-	if result.Error != "" {
-		return nil, fmt.Errorf("OMDB error: %s", result.Error)
-	}
-
-	return &result, nil
+	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // VerifyTVShowTitle uses TVDB (with OMDB fallback) to verify and resolve a TV show title
@@ -563,7 +804,7 @@ func VerifyTVShowTitleWithReporter(resolution *TVTitleResolution, tvdbKey, omdbK
 	return err
 }
 
-// verifyWithTVDB uses TVDB API to verify title
+// verifyWithTVDB uses TVDB API to verify title with retry and caching
 func verifyWithTVDB(resolution *TVTitleResolution, apiKey string) error {
 	if apiKey == "" {
 		return fmt.Errorf("TVDB API key not configured")
@@ -571,14 +812,11 @@ func verifyWithTVDB(resolution *TVTitleResolution, apiKey string) error {
 
 	client := NewTVDBClient(apiKey)
 
-	folderResults, err := client.SearchSeries(resolution.FolderMatch.Title)
-	if err != nil {
-		return fmt.Errorf("failed to search folder title: %w", err)
-	}
+	folderResults, folderErr := client.SearchSeries(resolution.FolderMatch.Title)
+	filenameResults, filenameErr := client.SearchSeries(resolution.FilenameMatch.Title)
 
-	filenameResults, err := client.SearchSeries(resolution.FilenameMatch.Title)
-	if err != nil {
-		return fmt.Errorf("failed to search filename title: %w", err)
+	if folderErr != nil && filenameErr != nil {
+		return fmt.Errorf("failed to search both titles (folder: %v, filename: %v)", folderErr, filenameErr)
 	}
 
 	if len(folderResults) == 0 && len(filenameResults) == 0 {
@@ -624,7 +862,7 @@ func verifyWithTVDB(resolution *TVTitleResolution, apiKey string) error {
 	return fmt.Errorf("unexpected API response")
 }
 
-// verifyWithOMDB uses OMDB API to verify title
+// verifyWithOMDB uses OMDB API to verify title with retry and caching
 func verifyWithOMDB(resolution *TVTitleResolution, apiKey string) error {
 	if apiKey == "" {
 		return fmt.Errorf("OMDB API key not configured")
@@ -636,7 +874,7 @@ func verifyWithOMDB(resolution *TVTitleResolution, apiKey string) error {
 	filenameResult, filenameErr := client.SearchSeries(resolution.FilenameMatch.Title)
 
 	if folderErr != nil && filenameErr != nil {
-		return fmt.Errorf("no results found for either title")
+		return fmt.Errorf("failed to search both titles (folder: %v, filename: %v)", folderErr, filenameErr)
 	}
 
 	if folderResult != nil && filenameResult == nil {

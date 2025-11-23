@@ -7,44 +7,19 @@ import (
 	"path/filepath"
 )
 
-// NotifyUser sends a desktop notification about the scan completion
-func NotifyUser(reportPath string, totalDuplicates int, spaceToFree int64, complianceIssues int) error {
-	// Format message with both duplicates and compliance issues
-	var message string
-	if complianceIssues > 0 {
-		message = fmt.Sprintf("Found %d duplicate groups (%.2f GB to free) + %d compliance issues",
-			totalDuplicates, float64(spaceToFree)/(1024*1024*1024), complianceIssues)
-	} else {
-		message = fmt.Sprintf("Found %d duplicate groups (%.2f GB to free)",
-			totalDuplicates, float64(spaceToFree)/(1024*1024*1024))
-	}
-
-	// Try notify-send first (most Linux desktops)
-	if err := notifySend("jellysink - Scan Complete", message); err == nil {
-		return nil
-	}
-
-	// Fallback to terminal bell
-	fmt.Print("\a")
-	fmt.Printf("\n[jellysink] Scan complete: %s\n", message)
-
-	return nil
+// NotifyUser launches kitty with the scan report (this IS the notification)
+func NotifyUser(reportPath string) error {
+	return LaunchTUI(reportPath)
 }
 
-// notifySend sends notification using notify-send
-func notifySend(title, message string) error {
-	cmd := exec.Command("notify-send",
-		"-u", "normal",
-		"-i", "dialog-information",
-		"-a", "jellysink",
-		title,
-		message)
-
-	return cmd.Run()
-}
-
-// LaunchTUI opens the TUI to review the report
+// LaunchTUI opens kitty terminal with the TUI to review the report
 func LaunchTUI(reportPath string) error {
+	// Check if kitty is available
+	kittyPath, err := exec.LookPath("kitty")
+	if err != nil {
+		return fmt.Errorf("kitty terminal not found (required for jellysink daemon): %w", err)
+	}
+
 	// Get jellysink binary path
 	binaryPath, err := exec.LookPath("jellysink")
 	if err != nil {
@@ -56,46 +31,29 @@ func LaunchTUI(reportPath string) error {
 		}
 	}
 
-	// Get current terminal
-	terminal := os.Getenv("TERM")
-	if terminal == "" {
-		terminal = "xterm"
+	// Launch TUI in kitty
+	// Use kitty's proper syntax: kitty [options] [program-to-run [program-args]]
+	// jellysink uses "view <report-file>" command to display reports
+	cmd := exec.Command(kittyPath, "--hold", binaryPath, "view", reportPath)
+
+	// Explicitly pass display environment variables (critical for GUI from systemd)
+	env := os.Environ()
+	if display := os.Getenv("DISPLAY"); display != "" {
+		env = append(env, fmt.Sprintf("DISPLAY=%s", display))
 	}
-
-	// Try to detect terminal emulator
-	terminalCmd := detectTerminal()
-	if terminalCmd == "" {
-		return fmt.Errorf("no suitable terminal emulator found")
+	if waylandDisplay := os.Getenv("WAYLAND_DISPLAY"); waylandDisplay != "" {
+		env = append(env, fmt.Sprintf("WAYLAND_DISPLAY=%s", waylandDisplay))
 	}
+	if xdgRuntime := os.Getenv("XDG_RUNTIME_DIR"); xdgRuntime != "" {
+		env = append(env, fmt.Sprintf("XDG_RUNTIME_DIR=%s", xdgRuntime))
+	}
+	cmd.Env = env
 
-	// Launch TUI in terminal
-	cmd := exec.Command(terminalCmd, "-e", binaryPath, reportPath)
-	cmd.Env = os.Environ()
-
+	// Start the process (non-blocking, like sysc-walls does)
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to launch TUI: %w", err)
+		return fmt.Errorf("failed to launch kitty with jellysink: %w", err)
 	}
 
+	// Don't wait for the process - let it run independently
 	return nil
-}
-
-// detectTerminal tries to find a suitable terminal emulator
-func detectTerminal() string {
-	terminals := []string{
-		"kitty",
-		"alacritty",
-		"wezterm",
-		"gnome-terminal",
-		"konsole",
-		"xfce4-terminal",
-		"xterm",
-	}
-
-	for _, term := range terminals {
-		if _, err := exec.LookPath(term); err == nil {
-			return term
-		}
-	}
-
-	return ""
 }

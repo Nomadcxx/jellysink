@@ -9,12 +9,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Nomadcxx/jellysink/internal/cleaner"
 	"github.com/Nomadcxx/jellysink/internal/reporter"
 	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
 
 // Custom messages for progress updates
 type progressMsg scanner.ScanProgress
+type cleanProgressMsg scanner.ScanProgress
 type scanCompleteMsg reporter.Report
 type scanErrorMsg error
 
@@ -26,7 +28,12 @@ const (
 	ViewDuplicates
 	ViewCompliance
 	ViewManualIntervention
+	ViewConflictReview
+	ViewBatchSummary
 	ViewScanning
+	ViewCleanOptions
+	ViewCleanConfirm
+	ViewCleaning
 )
 
 // Model represents the TUI state
@@ -43,12 +50,24 @@ type Model struct {
 	titleInput             textinput.Model
 	editedTitles           map[int]string
 
+	// New conflict resolution state
+	currentConflictIndex int
+	conflicts            []*scanner.TVTitleResolution
+	batchReviewCursor    int
+
 	// Scanning state
 	scanning        bool
 	scanLogs        []LogLine
 	currentProgress string
 	progressPercent float64
 	cancelled       bool
+
+	// Cleaning state
+	cleaning          bool
+	cleanProgressCh   chan scanner.ScanProgress
+	cleanResult       string
+	dryRun            bool
+	cleanOptionCursor int // 0 = Dry Run, 1 = Full Clean
 }
 
 // NewModel creates a new TUI model with a scan report
@@ -58,11 +77,15 @@ func NewModel(report reporter.Report) Model {
 	ti.CharLimit = 200
 	ti.Width = 60
 
+	conflicts := make([]*scanner.TVTitleResolution, len(report.AmbiguousTVShows))
+	copy(conflicts, report.AmbiguousTVShows)
+
 	return Model{
 		report:       report,
 		mode:         ViewSummary,
 		titleInput:   ti,
 		editedTitles: make(map[int]string),
+		conflicts:    conflicts,
 	}
 }
 
@@ -113,23 +136,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderScanning())
 		return m, nil
 
+	case cleanProgressMsg:
+		// Update cleaning progress (similar to scanning progress)
+		m.currentProgress = msg.Message
+		m.progressPercent = msg.Percentage
+
+		// Add to log buffer
+		logEntry := LogLine{
+			Timestamp: fmt.Sprintf("%02d:%02d", msg.ElapsedSeconds/60, msg.ElapsedSeconds%60),
+			Operation: msg.Operation,
+			Message:   msg.Message,
+			Severity:  msg.Severity,
+		}
+		m.scanLogs = append(m.scanLogs, logEntry)
+		if len(m.scanLogs) > 100 {
+			m.scanLogs = m.scanLogs[1:]
+		}
+
+		// Update viewport content
+		m.viewport.SetContent(m.renderCleaning())
+
+		// Continue listening for progress
+		return m, waitForCleanProgress(m.cleanProgressCh)
+
+	case cleanCompleteMsg:
+		// Cleaning finished
+		m.cleaning = false
+		if msg.result != "" {
+			m.cleanResult = msg.result
+		}
+		// If cleanResult is still empty, set a default message
+		if m.cleanResult == "" {
+			m.cleanResult = SuccessStyle.Render("✓ Cleanup completed")
+		}
+		m.viewport.SetContent(m.renderCleaning())
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.editingTitle {
 			switch msg.String() {
 			case "esc":
 				m.editingTitle = false
 				m.titleInput.Blur()
-				m.viewport.SetContent(m.renderManualIntervention())
+				if m.mode == ViewConflictReview {
+					m.viewport.SetContent(m.renderConflictReview())
+				} else {
+					m.viewport.SetContent(m.renderManualIntervention())
+				}
 				return m, nil
 
 			case "enter":
 				value := strings.TrimSpace(m.titleInput.Value())
 				if value != "" {
-					m.editedTitles[m.selectedAmbiguousIndex] = value
+					if m.mode == ViewConflictReview {
+						conflict := m.conflicts[m.currentConflictIndex]
+						conflict.UserDecision = scanner.DecisionCustomTitle
+						conflict.CustomTitle = value
+						conflict.ResolvedTitle = value
+						m.viewport.SetContent(m.renderConflictReview())
+					} else {
+						m.editedTitles[m.selectedAmbiguousIndex] = value
+						m.viewport.SetContent(m.renderManualIntervention())
+					}
 					m.editingTitle = false
 					m.titleInput.Blur()
 					m.titleInput.SetValue("")
-					m.viewport.SetContent(m.renderManualIntervention())
 				}
 				return m, nil
 
@@ -149,6 +220,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		case "esc":
+			// Handle ESC in batch summary
+			if m.mode == ViewBatchSummary {
+				m.mode = ViewConflictReview
+				m.viewport.SetContent(m.renderConflictReview())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			// Handle ESC in conflict review
+			if m.mode == ViewConflictReview {
+				m.mode = ViewSummary
+				m.viewport.SetContent(m.renderSummary())
+				return m, nil
+			}
+			// Handle ESC in cleaning options
+			if m.mode == ViewCleanOptions {
+				m.mode = ViewSummary
+				m.viewport.SetContent(m.renderSummary())
+				return m, nil
+			}
+			// Handle ESC in cleaning confirmation
+			if m.mode == ViewCleanConfirm {
+				m.mode = ViewCleanOptions
+				m.viewport.SetContent(m.renderCleanOptions())
+				m.viewport.GotoTop()
+				return m, nil
+			}
 			if m.mode != ViewSummary {
 				m.mode = ViewSummary
 				m.viewport.SetContent(m.renderSummary())
@@ -169,9 +266,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "f3":
-			if len(m.report.AmbiguousTVShows) > 0 {
-				m.mode = ViewManualIntervention
-				m.viewport.SetContent(m.renderManualIntervention())
+			if len(m.conflicts) > 0 {
+				m.mode = ViewConflictReview
+				m.currentConflictIndex = 0
+				m.viewport.SetContent(m.renderConflictReview())
 				m.viewport.GotoTop()
 			}
 			return m, nil
@@ -182,8 +280,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedAmbiguousIndex--
 					m.viewport.SetContent(m.renderManualIntervention())
 				}
+				return m, nil
 			}
-			return m, nil
+			if m.mode == ViewCleanOptions {
+				if m.cleanOptionCursor > 0 {
+					m.cleanOptionCursor--
+					m.viewport.SetContent(m.renderCleanOptions())
+				}
+				return m, nil
+			}
+			if m.mode == ViewDuplicates || m.mode == ViewCompliance {
+				m.viewport.LineUp(1)
+				return m, nil
+			}
 
 		case "down", "j":
 			if m.mode == ViewManualIntervention && !m.editingTitle {
@@ -191,10 +300,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selectedAmbiguousIndex++
 					m.viewport.SetContent(m.renderManualIntervention())
 				}
+				return m, nil
 			}
-			return m, nil
+			if m.mode == ViewCleanOptions {
+				if m.cleanOptionCursor < 1 {
+					m.cleanOptionCursor++
+					m.viewport.SetContent(m.renderCleanOptions())
+				}
+				return m, nil
+			}
+			if m.mode == ViewDuplicates || m.mode == ViewCompliance {
+				m.viewport.LineDown(1)
+				return m, nil
+			}
+
+		case "pgup":
+			if m.mode == ViewDuplicates || m.mode == ViewCompliance || m.mode == ViewManualIntervention {
+				m.viewport.ViewUp()
+				return m, nil
+			}
+
+		case "pgdown":
+			if m.mode == ViewDuplicates || m.mode == ViewCompliance || m.mode == ViewManualIntervention {
+				m.viewport.ViewDown()
+				return m, nil
+			}
 
 		case "e":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				m.editingTitle = true
+				conflict := m.conflicts[m.currentConflictIndex]
+				if conflict.CustomTitle != "" {
+					m.titleInput.SetValue(conflict.CustomTitle)
+				} else if conflict.FolderMatch != nil && conflict.FolderMatch.Confidence >= 0.5 {
+					m.titleInput.SetValue(conflict.FolderMatch.Title)
+				} else if conflict.FilenameMatch != nil {
+					m.titleInput.SetValue(conflict.FilenameMatch.Title)
+				}
+				m.titleInput.Focus()
+				m.viewport.SetContent(m.renderConflictReview())
+				return m, textinput.Blink
+			}
 			if m.mode == ViewManualIntervention && !m.editingTitle {
 				m.editingTitle = true
 				resolution := m.report.AmbiguousTVShows[m.selectedAmbiguousIndex]
@@ -214,6 +360,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				allDecided := true
+				for _, c := range m.conflicts {
+					if c.UserDecision == scanner.DecisionNone {
+						allDecided = false
+						break
+					}
+				}
+				if allDecided {
+					m.mode = ViewBatchSummary
+					m.batchReviewCursor = 0
+					m.viewport.SetContent(m.renderBatchSummary())
+					m.viewport.GotoTop()
+				}
+				return m, nil
+			}
 			if m.mode == ViewManualIntervention && !m.editingTitle {
 				if len(m.editedTitles) > 0 {
 					m.shouldClean = true
@@ -221,8 +383,154 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-			m.shouldClean = true
-			return m, tea.Quit
+			// Enter in summary mode triggers clean options
+			if m.mode == ViewSummary {
+				m.mode = ViewCleanOptions
+				m.cleanOptionCursor = 0
+				m.viewport.SetContent(m.renderCleanOptions())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			// Enter in clean options mode selects the highlighted option
+			if m.mode == ViewCleanOptions {
+				if m.cleanOptionCursor == 0 {
+					// Dry run selected
+					m.dryRun = true
+					m.mode = ViewCleaning
+					m.cleaning = true
+					m.scanLogs = []LogLine{}
+					m.viewport.SetContent(m.renderCleaning())
+					return m, m.runCleaning()
+				} else {
+					// Full clean selected - show confirmation
+					m.dryRun = false
+					m.mode = ViewCleanConfirm
+					m.viewport.SetContent(m.renderCleanConfirm())
+					m.viewport.GotoTop()
+					return m, nil
+				}
+			}
+			// Enter in clean confirm mode starts cleaning
+			if m.mode == ViewCleanConfirm {
+				m.mode = ViewCleaning
+				m.cleaning = true
+				m.scanLogs = []LogLine{} // Clear previous logs
+				m.viewport.SetContent(m.renderCleaning())
+				return m, m.runCleaning()
+			}
+			// Enter in batch summary applies renames
+			if m.mode == ViewBatchSummary {
+				m.shouldClean = true
+				return m, tea.Quit
+			}
+			return m, nil
+
+		case "1":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				conflict := m.conflicts[m.currentConflictIndex]
+				if conflict.FolderMatch != nil {
+					conflict.UserDecision = scanner.DecisionFolderTitle
+					conflict.ResolvedTitle = conflict.FolderMatch.Title
+					m.viewport.SetContent(m.renderConflictReview())
+				}
+				return m, nil
+			}
+			// Dry run selected from clean options
+			if m.mode == ViewCleanOptions {
+				m.dryRun = true
+				m.mode = ViewCleaning
+				m.cleaning = true
+				m.scanLogs = []LogLine{}
+				m.viewport.SetContent(m.renderCleaning())
+				return m, m.runCleaning()
+			}
+			return m, nil
+
+		case "2":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				conflict := m.conflicts[m.currentConflictIndex]
+				if conflict.FilenameMatch != nil {
+					conflict.UserDecision = scanner.DecisionFilenameTitle
+					conflict.ResolvedTitle = conflict.FilenameMatch.Title
+					m.viewport.SetContent(m.renderConflictReview())
+				}
+				return m, nil
+			}
+			// Full clean selected from clean options
+			if m.mode == ViewCleanOptions {
+				m.dryRun = false
+				m.mode = ViewCleanConfirm
+				m.viewport.SetContent(m.renderCleanConfirm())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			return m, nil
+
+		case "right":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				if m.currentConflictIndex < len(m.conflicts)-1 {
+					m.currentConflictIndex++
+					m.viewport.SetContent(m.renderConflictReview())
+					m.viewport.GotoTop()
+				}
+				return m, nil
+			}
+			return m, nil
+
+		case "left":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				if m.currentConflictIndex > 0 {
+					m.currentConflictIndex--
+					m.viewport.SetContent(m.renderConflictReview())
+					m.viewport.GotoTop()
+				}
+				return m, nil
+			}
+			return m, nil
+
+		case "n":
+			// Cancel cleaning confirmation
+			if m.mode == ViewCleanConfirm {
+				m.mode = ViewCleanOptions
+				m.viewport.SetContent(m.renderCleanOptions())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			return m, nil
+
+		case "s":
+			if m.mode == ViewConflictReview && !m.editingTitle {
+				conflict := m.conflicts[m.currentConflictIndex]
+				conflict.UserDecision = scanner.DecisionSkipped
+
+				if conflict.FolderMatch != nil && conflict.FilenameMatch != nil {
+					if conflict.FolderMatch.Confidence >= conflict.FilenameMatch.Confidence {
+						conflict.ResolvedTitle = conflict.FolderMatch.Title
+					} else {
+						conflict.ResolvedTitle = conflict.FilenameMatch.Title
+					}
+				} else if conflict.FolderMatch != nil {
+					conflict.ResolvedTitle = conflict.FolderMatch.Title
+				} else if conflict.FilenameMatch != nil {
+					conflict.ResolvedTitle = conflict.FilenameMatch.Title
+				}
+
+				if m.currentConflictIndex < len(m.conflicts)-1 {
+					m.currentConflictIndex++
+				}
+				m.viewport.SetContent(m.renderConflictReview())
+				m.viewport.GotoTop()
+				return m, nil
+			}
+			return m, nil
+
+		default:
+			// After cleaning completes, any key returns to summary
+			if m.mode == ViewCleaning && !m.cleaning {
+				m.mode = ViewSummary
+				m.viewport.SetContent(m.renderSummary())
+				return m, nil
+			}
 		}
 
 	case tea.WindowSizeMsg:
@@ -259,7 +567,7 @@ func (m Model) View() string {
 
 	switch m.mode {
 	case ViewSummary:
-		header = FormatHeader("JELLYSINK SCAN SUMMARY")
+		header = "" // No header, title is in content below ASCII art
 		if len(m.report.AmbiguousTVShows) > 0 {
 			footer = FormatFooter(
 				FormatKeybinding("F1", "Duplicates"),
@@ -296,14 +604,51 @@ func (m Model) View() string {
 			MutedStyle.Render(scrollInfo),
 		)
 
-	case ViewManualIntervention:
-		header = FormatHeader("MANUAL INTERVENTION REQUIRED")
+	case ViewConflictReview:
+		header = FormatHeader("CONFLICT RESOLUTION")
+		if m.editingTitle {
+			footer = FormatFooter(
+				FormatKeybinding("Type", "Edit"),
+				FormatKeybinding("Enter", "Save"),
+				FormatKeybinding("Esc", "Cancel"),
+			)
+		} else {
+			progressInfo := fmt.Sprintf("%d/%d", m.currentConflictIndex+1, len(m.conflicts))
+			footer = FormatFooter(
+				FormatKeybinding("1/2/E", "Select"),
+				FormatKeybinding("N/P", "Navigate"),
+				FormatKeybinding("S", "Skip"),
+				FormatKeybinding("Enter", "Review"),
+				FormatKeybinding("Esc", "Back"),
+				MutedStyle.Render(progressInfo),
+			)
+		}
+
+	case ViewBatchSummary:
+		header = FormatHeader("BATCH REVIEW")
 		footer = FormatFooter(
-			FormatKeybinding("↑↓", "Navigate"),
-			FormatKeybinding("E", "Edit Title"),
-			FormatKeybinding("Enter", "Apply Renames"),
+			FormatKeybinding("Enter", "Apply Changes"),
 			FormatKeybinding("Esc", "Back"),
 		)
+
+	case ViewManualIntervention:
+		header = FormatHeader("MANUAL INTERVENTION REQUIRED")
+		if m.editingTitle {
+			footer = FormatFooter(
+				FormatKeybinding("Type", "Edit"),
+				FormatKeybinding("Enter", "Save"),
+				FormatKeybinding("Esc", "Cancel"),
+			)
+		} else {
+			scrollInfo := fmt.Sprintf("%d/%d", m.selectedAmbiguousIndex+1, len(m.report.AmbiguousTVShows))
+			footer = FormatFooter(
+				FormatKeybinding("↑↓/PgUp/PgDn", "Navigate"),
+				FormatKeybinding("E", "Edit Title"),
+				FormatKeybinding("Enter", "Apply Renames"),
+				FormatKeybinding("Esc", "Back"),
+				MutedStyle.Render(scrollInfo),
+			)
+		}
 
 	case ViewScanning:
 		header = FormatHeader("SCANNING IN PROGRESS")
@@ -311,6 +656,33 @@ func (m Model) View() string {
 			FormatKeybinding("Ctrl+C", "Cancel Scan"),
 			MutedStyle.Render("Please wait..."),
 		)
+
+	case ViewCleanConfirm:
+		header = FormatHeader("CLEANUP CONFIRMATION")
+		footer = FormatFooter(
+			FormatKeybinding("Enter", "Confirm"),
+			FormatKeybinding("N/Esc", "Cancel"),
+		)
+
+	case ViewCleanOptions:
+		header = FormatHeader("CLEANUP OPTIONS")
+		footer = FormatFooter(
+			FormatKeybinding("↑↓", "Navigate"),
+			FormatKeybinding("Enter", "Select"),
+			FormatKeybinding("Esc", "Back"),
+		)
+
+	case ViewCleaning:
+		header = FormatHeader("CLEANING")
+		if m.cleaning {
+			footer = FormatFooter(
+				MutedStyle.Render("Please wait..."),
+			)
+		} else {
+			footer = FormatFooter(
+				FormatKeybinding("Any key", "Return to Menu"),
+			)
+		}
 	}
 
 	// Build full view
@@ -329,10 +701,34 @@ func (m Model) renderSummary() string {
 	// ASCII header
 	sb.WriteString(FormatASCIIHeader() + "\n\n")
 
+	// Title with different background to separate from ASCII art
+	titleStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(RAMAForeground).
+		Background(RAMABackground).
+		Padding(0, 1)
+	sb.WriteString(titleStyle.Render("JELLYSINK SCAN SUMMARY") + "\n\n")
+
 	// Timestamp and library info
 	sb.WriteString(InfoStyle.Render("Generated: ") + ContentStyle.Render(m.report.Timestamp.Format("2006-01-02 15:04:05")) + "\n")
 	sb.WriteString(InfoStyle.Render("Library: ") + ContentStyle.Render(m.report.LibraryType) + "\n")
-	sb.WriteString(InfoStyle.Render("Paths: ") + ContentStyle.Render(strings.Join(m.report.LibraryPaths, ", ")) + "\n\n")
+
+	// Format paths with max 4 per line to prevent overflow
+	sb.WriteString(InfoStyle.Render("Paths: "))
+	if len(m.report.LibraryPaths) > 0 {
+		for i, path := range m.report.LibraryPaths {
+			if i > 0 {
+				if i%4 == 0 {
+					// New line after every 4 paths
+					sb.WriteString("\n       ")
+				} else {
+					sb.WriteString(", ")
+				}
+			}
+			sb.WriteString(ContentStyle.Render(path))
+		}
+	}
+	sb.WriteString("\n\n")
 
 	// Duplicates section
 	sb.WriteString(TitleStyle.Render("DUPLICATES") + "\n")
@@ -702,4 +1098,447 @@ func (m Model) ShouldClean() bool {
 // GetEditedTitles returns the map of edited titles by ambiguous show index
 func (m Model) GetEditedTitles() map[int]string {
 	return m.editedTitles
+}
+
+// GetResolvedConflicts returns conflicts with user decisions
+func (m Model) GetResolvedConflicts() []*scanner.TVTitleResolution {
+	return m.conflicts
+}
+
+// renderCleanOptions renders the cleanup options selection view
+func (m Model) renderCleanOptions() string {
+	var sb strings.Builder
+
+	sb.WriteString(TitleStyle.Render("CLEANUP OPTIONS") + "\n\n")
+
+	sb.WriteString(InfoStyle.Render("Choose how to proceed with cleanup:") + "\n\n")
+
+	// Show what will be cleaned
+	if m.report.TotalFilesToDelete > 0 {
+		sb.WriteString(MutedStyle.Render("Duplicate Deletions:") + "\n")
+		sb.WriteString(fmt.Sprintf("  • %s files marked for deletion\n", StatStyle.Render(fmt.Sprintf("%d", m.report.TotalFilesToDelete))))
+		sb.WriteString(fmt.Sprintf("  • %s of space to be freed\n", StatStyle.Render(formatBytes(m.report.SpaceToFree))))
+		sb.WriteString("\n")
+	}
+
+	if len(m.report.ComplianceIssues) > 0 {
+		sb.WriteString(MutedStyle.Render("Compliance Fixes:") + "\n")
+		sb.WriteString(fmt.Sprintf("  • %s files/folders to be renamed or reorganized\n", StatStyle.Render(fmt.Sprintf("%d", len(m.report.ComplianceIssues)))))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(strings.Repeat("─", 80) + "\n\n")
+
+	// Options with selection cursor
+	cursor := " "
+	if m.cleanOptionCursor == 0 {
+		cursor = "→"
+	}
+	selectedStyle := ContentStyle
+	if m.cleanOptionCursor == 0 {
+		selectedStyle = HighlightStyle
+	}
+	sb.WriteString(cursor + " " + selectedStyle.Render("1. DRY RUN") + " - Preview operations without making changes\n")
+	sb.WriteString("     • Shows exactly what would be done\n")
+	sb.WriteString("     • No files are modified or deleted\n")
+	sb.WriteString("     • Safe to run multiple times\n\n")
+
+	cursor = " "
+	if m.cleanOptionCursor == 1 {
+		cursor = "→"
+	}
+	selectedStyle = ContentStyle
+	if m.cleanOptionCursor == 1 {
+		selectedStyle = WarningStyle
+	}
+	sb.WriteString(cursor + " " + selectedStyle.Render("2. FULL CLEAN") + " - Execute all operations\n")
+	sb.WriteString("     • Deletes duplicate files\n")
+	sb.WriteString("     • Renames/reorganizes for compliance\n")
+	sb.WriteString("     • ⚠ CANNOT BE UNDONE\n\n")
+
+	sb.WriteString(strings.Repeat("─", 80) + "\n\n")
+
+	sb.WriteString(SuccessStyle.Render("Press Enter to select") + " | " +
+		MutedStyle.Render("Use ↑↓ to navigate") + " | " +
+		MutedStyle.Render("Press Esc to cancel") + "\n")
+
+	return sb.String()
+}
+
+func (m Model) renderCleanConfirm() string {
+	var sb strings.Builder
+
+	sb.WriteString(TitleStyle.Render("CONFIRM CLEANUP OPERATION") + "\n\n")
+
+	sb.WriteString(WarningStyle.Render("⚠ WARNING: You are about to perform the following operations:") + "\n\n")
+
+	// Show what will be cleaned
+	if m.report.TotalFilesToDelete > 0 {
+		sb.WriteString(InfoStyle.Render("Duplicate Deletions:") + "\n")
+		sb.WriteString(fmt.Sprintf("  • %s files will be deleted\n", StatStyle.Render(fmt.Sprintf("%d", m.report.TotalFilesToDelete))))
+		sb.WriteString(fmt.Sprintf("  • %s of space will be freed\n", SuccessStyle.Render(formatBytes(m.report.SpaceToFree))))
+		sb.WriteString("\n")
+	}
+
+	if len(m.report.ComplianceIssues) > 0 {
+		sb.WriteString(InfoStyle.Render("Compliance Fixes:") + "\n")
+		sb.WriteString(fmt.Sprintf("  • %s files/folders will be renamed or reorganized\n", StatStyle.Render(fmt.Sprintf("%d", len(m.report.ComplianceIssues)))))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(ErrorStyle.Render("⚠ THIS OPERATION CANNOT BE UNDONE") + "\n\n")
+
+	sb.WriteString(MutedStyle.Render("Are you sure you want to proceed?") + "\n\n")
+
+	sb.WriteString(SuccessStyle.Render("Press Enter to confirm") + " | " + ErrorStyle.Render("Press N or Esc to cancel") + "\n")
+
+	return sb.String()
+}
+
+// renderCleaning renders the cleaning progress view
+func (m Model) renderCleaning() string {
+	var sb strings.Builder
+
+	// ASCII header
+	sb.WriteString(FormatASCIIHeader() + "\n\n")
+
+	if m.cleaning {
+		// Show title based on mode
+		if m.dryRun {
+			sb.WriteString(TitleStyle.Render("DRY RUN - PREVIEW MODE") + "\n")
+			sb.WriteString(InfoStyle.Render("No files will be modified") + "\n\n")
+		} else {
+			sb.WriteString(TitleStyle.Render("CLEANING IN PROGRESS") + "\n\n")
+		}
+
+		// Show progress bar
+		progressBar := renderProgressBar(m.progressPercent, 50)
+		sb.WriteString(progressBar + "\n")
+		sb.WriteString(fmt.Sprintf("  %s %.1f%%\n\n", m.currentProgress, m.progressPercent))
+
+		// Show cleaning log (last 20 lines)
+		if m.dryRun {
+			sb.WriteString(TitleStyle.Render("PREVIEW LOG (No Changes Made)") + "\n")
+		} else {
+			sb.WriteString(TitleStyle.Render("CLEANING LOG") + "\n")
+		}
+		sb.WriteString(strings.Repeat("─", 80) + "\n")
+
+		startIdx := 0
+		if len(m.scanLogs) > 20 {
+			startIdx = len(m.scanLogs) - 20
+		}
+
+		for _, log := range m.scanLogs[startIdx:] {
+			var prefix string
+			switch log.Severity {
+			case "error":
+				prefix = ErrorStyle.Render("✗")
+			case "warn":
+				prefix = WarningStyle.Render("⚠")
+			case "success":
+				prefix = SuccessStyle.Render("✓")
+			default:
+				prefix = InfoStyle.Render("•")
+			}
+
+			timeStr := ""
+			if log.Timestamp != "" {
+				timeStr = MutedStyle.Render(fmt.Sprintf("[%s] ", log.Timestamp))
+			}
+
+			sb.WriteString(fmt.Sprintf("%s %s%s\n", prefix, timeStr, log.Message))
+		}
+	} else {
+		// Cleaning complete
+		if m.dryRun {
+			sb.WriteString(TitleStyle.Render("DRY RUN COMPLETE") + "\n\n")
+			sb.WriteString(InfoStyle.Render("✓ Preview completed - no files were modified") + "\n\n")
+		} else {
+			sb.WriteString(TitleStyle.Render("CLEANUP COMPLETE") + "\n\n")
+		}
+		sb.WriteString(m.cleanResult + "\n\n")
+		sb.WriteString(MutedStyle.Render("Press any key to exit") + "\n")
+	}
+
+	return sb.String()
+}
+
+// runCleaning executes the cleaning operation
+func (m *Model) runCleaning() tea.Cmd {
+	// Configure cleaner with safe defaults
+	cfg := cleaner.DefaultConfig()
+	cfg.DryRun = m.dryRun // Use the dryRun flag from model
+
+	// Create progress channel and store in model
+	m.cleanProgressCh = make(chan scanner.ScanProgress, 100)
+
+	// Start cleaning in goroutine
+	go func() {
+		result, err := cleaner.CleanWithProgress(
+			m.report.MovieDuplicates,
+			m.report.TVDuplicates,
+			m.report.ComplianceIssues,
+			cfg,
+			m.cleanProgressCh,
+		)
+		close(m.cleanProgressCh)
+
+		// Send final result through a special completion progress message
+		if err != nil {
+			// Error case will be handled by the final message
+			return
+		}
+
+		// Build result summary and send as final progress message
+		var sb strings.Builder
+		if result.DryRun {
+			sb.WriteString(SuccessStyle.Render("✓ Dry run preview completed!") + "\n\n")
+			sb.WriteString(InfoStyle.Render("Operations that would be performed:") + "\n")
+
+			// Calculate totals from operations
+			totalDuplicates := 0
+			totalCompliance := 0
+			for _, op := range result.Operations {
+				if op.Type == "delete" {
+					totalDuplicates++
+				} else {
+					totalCompliance++
+				}
+			}
+
+			sb.WriteString(fmt.Sprintf("  • Duplicates would be deleted: %s\n", StatStyle.Render(fmt.Sprintf("%d", totalDuplicates))))
+			sb.WriteString(fmt.Sprintf("  • Compliance issues would be fixed: %s\n", StatStyle.Render(fmt.Sprintf("%d", totalCompliance))))
+
+			// Calculate potential space from duplicate operations
+			potentialSpace := int64(0)
+			for _, dup := range m.report.MovieDuplicates {
+				for i := 1; i < len(dup.Files); i++ {
+					potentialSpace += dup.Files[i].Size
+				}
+			}
+			for _, dup := range m.report.TVDuplicates {
+				for i := 1; i < len(dup.Files); i++ {
+					potentialSpace += dup.Files[i].Size
+				}
+			}
+			sb.WriteString(fmt.Sprintf("  • Space would be freed: %s\n", SuccessStyle.Render(formatBytes(potentialSpace))))
+		} else {
+			sb.WriteString(SuccessStyle.Render("✓ Cleanup completed successfully!") + "\n\n")
+			sb.WriteString(InfoStyle.Render("Results:") + "\n")
+			sb.WriteString(fmt.Sprintf("  • Duplicates deleted: %s\n", StatStyle.Render(fmt.Sprintf("%d", result.DuplicatesDeleted))))
+			sb.WriteString(fmt.Sprintf("  • Compliance fixed: %s\n", StatStyle.Render(fmt.Sprintf("%d", result.ComplianceFixed))))
+			sb.WriteString(fmt.Sprintf("  • Space freed: %s\n", SuccessStyle.Render(formatBytes(result.SpaceFreed))))
+		}
+
+		if len(result.Errors) > 0 {
+			sb.WriteString(fmt.Sprintf("\n%s\n", WarningStyle.Render(fmt.Sprintf("⚠ %d error(s) occurred:", len(result.Errors)))))
+			for i, err := range result.Errors {
+				if i >= 5 {
+					sb.WriteString(MutedStyle.Render(fmt.Sprintf("  ... and %d more\n", len(result.Errors)-5)))
+					break
+				}
+				sb.WriteString(ErrorStyle.Render(fmt.Sprintf("  • %v\n", err)))
+			}
+		}
+
+		m.cleanResult = sb.String()
+	}()
+
+	// Wait for first progress message
+	return waitForCleanProgress(m.cleanProgressCh)
+}
+
+func waitForCleanProgress(progressCh chan scanner.ScanProgress) tea.Cmd {
+	return func() tea.Msg {
+		progress, ok := <-progressCh
+		if !ok {
+			// Channel closed, cleaning is complete
+			return cleanCompleteMsg{
+				result: "", // Result already set in model
+				err:    nil,
+			}
+		}
+		return cleanProgressMsg(progress)
+	}
+}
+
+// cleanCompleteMsg is sent when cleaning finishes
+type cleanCompleteMsg struct {
+	result string
+	err    error
+}
+
+// renderConflictReview renders single conflict review screen (Stage 1)
+func (m Model) renderConflictReview() string {
+	var sb strings.Builder
+
+	if len(m.conflicts) == 0 {
+		sb.WriteString(SuccessStyle.Render("✓ No conflicts to resolve") + "\n")
+		return sb.String()
+	}
+
+	conflict := m.conflicts[m.currentConflictIndex]
+
+	sb.WriteString(TitleStyle.Render("TV SHOW TITLE CONFLICT") + "\n\n")
+
+	sb.WriteString(InfoStyle.Render(fmt.Sprintf("Reviewing conflict %d of %d", m.currentConflictIndex+1, len(m.conflicts))) + "\n\n")
+
+	sb.WriteString(HighlightStyle.Render("⚠ CONFLICTING TITLES DETECTED") + "\n\n")
+
+	if conflict.FolderMatch != nil {
+		sb.WriteString(InfoStyle.Render("Option 1: Folder Title") + "\n")
+		sb.WriteString(fmt.Sprintf("  %s", ContentStyle.Render(conflict.FolderMatch.Title)))
+		if conflict.FolderMatch.Year != "" {
+			sb.WriteString(MutedStyle.Render(fmt.Sprintf(" (%s)", conflict.FolderMatch.Year)))
+		}
+		sb.WriteString(fmt.Sprintf(" [confidence: %s]\n", StatStyle.Render(fmt.Sprintf("%.0f%%", conflict.FolderMatch.Confidence*100))))
+		if conflict.UserDecision == scanner.DecisionFolderTitle {
+			sb.WriteString(SuccessStyle.Render("  ✓ SELECTED") + "\n")
+		} else {
+			sb.WriteString(MutedStyle.Render("  Press '1' to select") + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	if conflict.FilenameMatch != nil {
+		sb.WriteString(InfoStyle.Render("Option 2: Filename Title") + "\n")
+		sb.WriteString(fmt.Sprintf("  %s", ContentStyle.Render(conflict.FilenameMatch.Title)))
+		if conflict.FilenameMatch.Year != "" {
+			sb.WriteString(MutedStyle.Render(fmt.Sprintf(" (%s)", conflict.FilenameMatch.Year)))
+		}
+		sb.WriteString(fmt.Sprintf(" [confidence: %s]\n", StatStyle.Render(fmt.Sprintf("%.0f%%", conflict.FilenameMatch.Confidence*100))))
+		if conflict.UserDecision == scanner.DecisionFilenameTitle {
+			sb.WriteString(SuccessStyle.Render("  ✓ SELECTED") + "\n")
+		} else {
+			sb.WriteString(MutedStyle.Render("  Press '2' to select") + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(InfoStyle.Render("Option 3: Custom Title") + "\n")
+	if conflict.UserDecision == scanner.DecisionCustomTitle && conflict.CustomTitle != "" {
+		sb.WriteString(fmt.Sprintf("  %s\n", SuccessStyle.Render(conflict.CustomTitle)))
+		sb.WriteString(SuccessStyle.Render("  ✓ SELECTED") + "\n")
+	} else if m.editingTitle {
+		sb.WriteString("  " + m.titleInput.View() + "\n")
+		sb.WriteString(MutedStyle.Render("  Press Enter to save, Esc to cancel") + "\n")
+	} else {
+		sb.WriteString(MutedStyle.Render("  Press 'E' to enter custom title") + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString(strings.Repeat("─", 80) + "\n\n")
+
+	sb.WriteString(MutedStyle.Render("Conflict Reason: ") + ErrorStyle.Render(conflict.Reason) + "\n")
+
+	if conflict.APIVerified {
+		sb.WriteString(WarningStyle.Render("⚠ API returned conflicting results") + "\n")
+	} else {
+		sb.WriteString(MutedStyle.Render("ℹ API verification unavailable") + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(strings.Repeat("─", 80) + "\n\n")
+
+	hasDecision := conflict.UserDecision != scanner.DecisionNone
+
+	// Check if all conflicts have decisions
+	allDecided := true
+	for _, c := range m.conflicts {
+		if c.UserDecision == scanner.DecisionNone {
+			allDecided = false
+			break
+		}
+	}
+
+	if hasDecision {
+		sb.WriteString(SuccessStyle.Render("✓ Decision recorded") + "\n")
+		sb.WriteString(MutedStyle.Render("  ← → to navigate conflicts") + "\n")
+		if allDecided {
+			sb.WriteString(SuccessStyle.Render("  ✓ All conflicts resolved - Press Enter to proceed to batch review") + "\n")
+		}
+	} else {
+		sb.WriteString(WarningStyle.Render("⚠ No decision made yet") + "\n")
+		sb.WriteString(MutedStyle.Render("  Select an option (1/2/E) or press 'S' to skip") + "\n")
+		sb.WriteString(MutedStyle.Render("  ← → to navigate conflicts") + "\n")
+	}
+
+	return sb.String()
+}
+
+// renderBatchSummary renders decision summary table (Stage 2)
+func (m Model) renderBatchSummary() string {
+	var sb strings.Builder
+
+	sb.WriteString(TitleStyle.Render("BATCH REVIEW SUMMARY") + "\n\n")
+
+	sb.WriteString(InfoStyle.Render(fmt.Sprintf("Reviewing %d decision(s) before applying changes", len(m.conflicts))) + "\n\n")
+
+	sb.WriteString(strings.Repeat("─", 100) + "\n")
+	sb.WriteString(fmt.Sprintf("%-4s %-30s %-30s %-15s\n",
+		HighlightStyle.Render("#"),
+		HighlightStyle.Render("Show Name"),
+		HighlightStyle.Render("New Title"),
+		HighlightStyle.Render("Source")))
+	sb.WriteString(strings.Repeat("─", 100) + "\n")
+
+	for i, conflict := range m.conflicts {
+		cursor := "  "
+		if i == m.batchReviewCursor {
+			cursor = "→ "
+		}
+
+		var oldTitle string
+		if conflict.FolderMatch != nil {
+			oldTitle = conflict.FolderMatch.Title
+		} else if conflict.FilenameMatch != nil {
+			oldTitle = conflict.FilenameMatch.Title
+		}
+
+		newTitle := conflict.ResolvedTitle
+		var source string
+		switch conflict.UserDecision {
+		case scanner.DecisionFolderTitle:
+			source = "Folder"
+		case scanner.DecisionFilenameTitle:
+			source = "Filename"
+		case scanner.DecisionCustomTitle:
+			source = "Custom"
+		case scanner.DecisionSkipped:
+			source = "Auto (skipped)"
+		default:
+			source = "Unknown"
+		}
+
+		lineStyle := ContentStyle
+		if i == m.batchReviewCursor {
+			lineStyle = HighlightStyle
+		}
+
+		sb.WriteString(lineStyle.Render(fmt.Sprintf("%s%-2d %-30s %-30s %-15s\n",
+			cursor,
+			i+1,
+			truncate(oldTitle, 30),
+			truncate(newTitle, 30),
+			source)))
+	}
+
+	sb.WriteString(strings.Repeat("─", 100) + "\n\n")
+
+	sb.WriteString(InfoStyle.Render("Next Steps:") + "\n")
+	sb.WriteString("  • Review the decisions above\n")
+	sb.WriteString("  • Press Enter to apply all renames\n")
+	sb.WriteString("  • Press Esc to go back and make changes\n\n")
+
+	sb.WriteString(WarningStyle.Render("⚠ Renames will be applied to both folders and filenames for consistency") + "\n")
+
+	return sb.String()
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }

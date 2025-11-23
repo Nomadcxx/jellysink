@@ -80,11 +80,12 @@ func RunFullScan(ctx context.Context, moviePaths, tvPaths []string, progressCh c
 		// Exclude files marked for deletion
 		tvFilesToDelete := GetTVDeleteList(result.TVDuplicates)
 
-		tvComplianceIssues, err := ScanTVComplianceWithProgress(tvPaths, progressCh, tvFilesToDelete...)
+		tvComplianceResult, err := ScanTVComplianceWithAmbiguous(tvPaths, progressCh, tvFilesToDelete...)
 		if err != nil {
 			return nil, fmt.Errorf("TV compliance scan failed: %w", err)
 		}
-		result.ComplianceIssues = append(result.ComplianceIssues, tvComplianceIssues...)
+		result.ComplianceIssues = append(result.ComplianceIssues, tvComplianceResult.Issues...)
+		result.AmbiguousTVShows = tvComplianceResult.AmbiguousTVShows
 	}
 
 	// Calculate statistics

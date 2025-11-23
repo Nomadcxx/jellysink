@@ -315,7 +315,13 @@ func (pr *ProgressReporter) Send(severity, message string) {
 
 // CountVideoFiles counts all video files in the given paths (for accurate progress)
 func CountVideoFiles(paths []string) (int, error) {
+	return CountVideoFilesWithProgress(paths, nil)
+}
+
+// CountVideoFilesWithProgress counts video files and reports progress
+func CountVideoFilesWithProgress(paths []string, pr *ProgressReporter) (int, error) {
 	count := 0
+	directoriesScanned := 0
 
 	for _, libPath := range paths {
 		if _, err := os.Stat(libPath); err != nil {
@@ -327,8 +333,20 @@ func CountVideoFiles(paths []string) (int, error) {
 				return err
 			}
 
+			// Report progress every 100 directories
+			if info.IsDir() {
+				directoriesScanned++
+				if pr != nil && directoriesScanned%100 == 0 {
+					pr.Send("info", fmt.Sprintf("Counting files... (%d found so far)", count))
+				}
+			}
+
 			if !info.IsDir() && isVideoFile(path) {
 				count++
+				// Also report every 500 files found
+				if pr != nil && count%500 == 0 {
+					pr.Send("info", fmt.Sprintf("Counting files... (%d found so far)", count))
+				}
 			}
 
 			return nil

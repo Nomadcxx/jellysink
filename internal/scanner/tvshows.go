@@ -36,7 +36,7 @@ func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]
 	var pr *ProgressReporter
 	if progressCh != nil {
 		pr = NewProgressReporterWithInterval(progressCh, "scanning_tv", 200*time.Millisecond)
-		pr.send(0, "Counting TV files...")
+		pr.StageUpdate("counting_files", "Counting TV files...")
 
 		total, err := CountVideoFiles(paths)
 		if err != nil {
@@ -78,7 +78,7 @@ func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]
 			}
 
 			filesProcessed++
-			if pr != nil && filesProcessed%10 == 0 {
+			if pr != nil && filesProcessed%5 == 0 {
 				pr.Update(filesProcessed, fmt.Sprintf("Processing: %s", filepath.Base(path)))
 			}
 
@@ -92,10 +92,11 @@ func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]
 			// Parse TV file metadata
 			tvFile := parseTVFile(path, info)
 
-			// Extract show name from parent directory structure
-			// Expected: Show Name (Year)/Season ##/episode.mkv
-			showDir := filepath.Dir(filepath.Dir(path)) // Go up two levels
-			showName := filepath.Base(showDir)
+			// Extract show name intelligently using title resolution logic
+			// This handles both:
+			// 1. Jellyfin structure: Show Name (Year)/Season ##/episode.mkv
+			// 2. Flat structure: Show.Name.S01E01.mkv (no Season folder)
+			showName := extractShowNameFromPath(path)
 
 			// Normalize show name
 			normalized := NormalizeName(showName)
@@ -135,6 +136,38 @@ func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]
 	}
 
 	return duplicates, nil
+}
+
+// extractShowNameFromPath intelligently extracts show name from file path
+// Handles both:
+// 1. Jellyfin structure: /library/Show Name (Year)/Season 01/episode.mkv
+// 2. Flat structure: /library/Show.Name.S01E01.mkv
+// 3. Release folder: /library/Show.Name.2024.S01.1080p-GROUP/episode.mkv
+func extractShowNameFromPath(path string) string {
+	filename := filepath.Base(path)
+	parentDir := filepath.Base(filepath.Dir(path))
+
+	// Check if parent directory looks like a season folder (e.g., "Season 01", "Season 1", "S01")
+	isSeasonFolder := strings.HasPrefix(strings.ToLower(parentDir), "season") ||
+		strings.HasPrefix(strings.ToUpper(parentDir), "S") && len(parentDir) <= 4
+
+	if isSeasonFolder {
+		// Jellyfin structure: go up 2 levels to get show folder
+		showDir := filepath.Dir(filepath.Dir(path))
+		showName, _ := ExtractTVShowTitle(filepath.Base(showDir))
+		return showName
+	}
+
+	// Flat or release group structure: extract from filename or parent folder
+	// Try filename first (most reliable)
+	showName, _ := ExtractTVShowTitle(filename)
+	if showName != "" && len(showName) > 2 {
+		return showName
+	}
+
+	// Fall back to parent directory name
+	showName, _ = ExtractTVShowTitle(parentDir)
+	return showName
 }
 
 // parseTVFile extracts metadata from TV episode file

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -18,9 +19,14 @@ var (
 	version   = "dev"
 	commit    = "unknown"
 	buildTime = "unknown"
+
+	// CLI flags
+	testMode = flag.Bool("test", false, "Test mode: run scan and launch kitty to verify workflow")
 )
 
 func main() {
+	flag.Parse()
+
 	// Load configuration
 	cfg, err := loadConfig()
 	if err != nil {
@@ -52,12 +58,17 @@ func main() {
 	d := daemon.New(cfg)
 
 	// Run scan
-	fmt.Println("jellysinkd: Starting scheduled scan...")
+	if *testMode {
+		fmt.Println("jellysinkd: Running in TEST MODE...")
+	} else {
+		fmt.Println("jellysinkd: Starting scheduled scan...")
+	}
+
 	reportPath, err := d.RunScan(ctx)
 	if err != nil {
 		if err == context.Canceled {
 			fmt.Fprintf(os.Stderr, "Scan cancelled by signal\n")
-			os.Exit(130) // Exit code 130 for SIGINT
+			os.Exit(130)
 		}
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
@@ -78,15 +89,31 @@ func main() {
 	}
 	fmt.Printf("Report saved to: %s\n", reportPath)
 
-	// Send notification
-	if err := daemon.NotifyUser(reportPath, report.TotalDuplicates, report.SpaceToFree, len(report.ComplianceIssues)); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to send notification: %v\n", err)
+	// Clean up old reports (30+ days)
+	if err := daemon.CleanupOldReports(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to clean old reports: %v\n", err)
 	}
 
-	// Launch TUI for user review
-	if err := daemon.LaunchTUI(reportPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to launch TUI: %v\n", err)
-		fmt.Fprintf(os.Stderr, "View report manually with: jellysink view %s\n", reportPath)
+	// Determine workflow: headless auto-clean or interactive review
+	if d.IsHeadless() && !*testMode {
+		fmt.Println("Headless mode detected - running auto-clean...")
+		if err := d.AutoClean(report); err != nil {
+			fmt.Fprintf(os.Stderr, "Auto-clean failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		// Interactive mode: launch kitty with report
+		fmt.Println("Launching kitty for interactive review...")
+		if err := daemon.NotifyUser(reportPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to launch kitty: %v\n", err)
+			fmt.Fprintf(os.Stderr, "View report manually with: jellysink view %s\n", reportPath)
+			os.Exit(1)
+		}
+
+		if *testMode {
+			fmt.Println("\n✓ TEST MODE: Kitty launched successfully!")
+			fmt.Println("  Check if kitty window opened with the scan report.")
+		}
 	}
 }
 

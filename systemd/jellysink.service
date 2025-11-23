@@ -1,11 +1,17 @@
 [Unit]
 Description=Jellysink media library scan service
-After=network.target
+After=graphical-session.target
+Documentation=https://github.com/Nomadcxx/jellysink
 
 [Service]
 Type=oneshot
 User=%u
 ExecStart=/usr/local/bin/jellysinkd
+
+# Environment variables for GUI launching
+Environment=DISPLAY=%E{DISPLAY}
+Environment=WAYLAND_DISPLAY=%E{WAYLAND_DISPLAY}
+Environment=XDG_RUNTIME_DIR=%t
 
 # Security hardening
 PrivateTmp=true
@@ -15,4 +21,4 @@ ProtectHome=read-only
 ReadWritePaths=%h/.local/share/jellysink %h/.config/jellysink
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

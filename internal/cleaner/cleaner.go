@@ -155,9 +155,19 @@ func CleanWithProgress(duplicates []scanner.MovieDuplicate, tvDuplicates []scann
 
 				}
 			} else {
-				op.Completed = true
-				if pr != nil {
-					pr.Update(processed+1, fmt.Sprintf("Dry-run: delete %s", file.Path))
+				// Dry run: check permissions and accessibility without deleting
+				if err := checkFileAccessible(file.Path); err != nil {
+					result.Errors = append(result.Errors,
+						fmt.Errorf("cannot delete %s: %w", file.Path, err))
+					op.Completed = false
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Cannot delete (dry-run): %s", file.Path))
+					}
+				} else {
+					op.Completed = true
+					if pr != nil {
+						pr.Update(processed+1, fmt.Sprintf("Would delete: %s", file.Path))
+					}
 				}
 			}
 
@@ -207,9 +217,19 @@ func CleanWithProgress(duplicates []scanner.MovieDuplicate, tvDuplicates []scann
 
 				}
 			} else {
-				op.Completed = true
-				if pr != nil {
-					pr.Update(processed+1, fmt.Sprintf("Dry-run: delete %s", file.Path))
+				// Dry run: check permissions and accessibility without deleting
+				if err := checkFileAccessible(file.Path); err != nil {
+					result.Errors = append(result.Errors,
+						fmt.Errorf("cannot delete %s: %w", file.Path, err))
+					op.Completed = false
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Cannot delete (dry-run): %s", file.Path))
+					}
+				} else {
+					op.Completed = true
+					if pr != nil {
+						pr.Update(processed+1, fmt.Sprintf("Would delete: %s", file.Path))
+					}
 				}
 			}
 
@@ -261,6 +281,18 @@ func CleanWithProgress(duplicates []scanner.MovieDuplicate, tvDuplicates []scann
 			} else {
 				err = fmt.Errorf("unknown issue type: %s", issue.Type)
 			}
+		} else {
+			// Dry run: check if rename/move is possible without actually doing it
+			err = checkRenameAccessible(issue.Path, issue.SuggestedPath)
+			if err != nil {
+				if pr != nil {
+					pr.LogError(err, fmt.Sprintf("Cannot fix (dry-run): %s", issue.Path))
+				}
+			} else {
+				if pr != nil {
+					pr.Update(processed+1, fmt.Sprintf("Would fix: %s -> %s", issue.Path, issue.SuggestedPath))
+				}
+			}
 		}
 
 		// Build operation record
@@ -279,8 +311,10 @@ func CleanWithProgress(duplicates []scanner.MovieDuplicate, tvDuplicates []scann
 			}
 		} else {
 			op.Completed = true
-			result.ComplianceFixed++
-			if pr != nil {
+			if !config.DryRun {
+				result.ComplianceFixed++
+			}
+			if pr != nil && !config.DryRun {
 				pr.Update(processed+1, fmt.Sprintf("Fixed compliance: %s", issue.Path))
 			}
 		}
@@ -516,6 +550,104 @@ func isProtectedPath(path string, protected []string) bool {
 		}
 	}
 	return false
+}
+
+// checkFileAccessible checks if a file can be deleted without actually deleting it
+// This surfaces permission errors, missing files, etc. during dry run
+func checkFileAccessible(path string) error {
+	// Check if file exists
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("cannot access file: %w", err)
+	}
+
+	// Check if it's a regular file
+	if info.IsDir() {
+		return fmt.Errorf("path is a directory, not a file")
+	}
+
+	// Check parent directory write permissions (needed to delete)
+	parentDir := filepath.Dir(path)
+	parentInfo, err := os.Stat(parentDir)
+	if err != nil {
+		return fmt.Errorf("cannot access parent directory: %w", err)
+	}
+
+	// Check if parent directory is writable
+	if parentInfo.Mode().Perm()&0200 == 0 {
+		return fmt.Errorf("parent directory not writable (permissions: %o)", parentInfo.Mode().Perm())
+	}
+
+	// Try to open file for reading to verify access
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("cannot open file: %w", err)
+	}
+	f.Close()
+
+	return nil
+}
+
+// checkRenameAccessible checks if a file/folder can be renamed without actually renaming it
+// This surfaces permission errors, path conflicts, etc. during dry run
+func checkRenameAccessible(oldPath, newPath string) error {
+	// Check if source exists
+	info, err := os.Stat(oldPath)
+	if err != nil {
+		return fmt.Errorf("cannot access source: %w", err)
+	}
+
+	// Check if destination already exists
+	if _, err := os.Stat(newPath); err == nil {
+		return fmt.Errorf("destination already exists: %s", newPath)
+	}
+
+	// Check parent directory of source is writable
+	srcParent := filepath.Dir(oldPath)
+	srcParentInfo, err := os.Stat(srcParent)
+	if err != nil {
+		return fmt.Errorf("cannot access source parent directory: %w", err)
+	}
+	if srcParentInfo.Mode().Perm()&0200 == 0 {
+		return fmt.Errorf("source parent directory not writable (permissions: %o)", srcParentInfo.Mode().Perm())
+	}
+
+	// Check if destination parent exists and is writable
+	destParent := filepath.Dir(newPath)
+
+	// If destination parent doesn't exist, check if we can create it
+	destParentInfo, err := os.Stat(destParent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Need to create parent dirs - check grandparent
+			grandParent := filepath.Dir(destParent)
+			grandParentInfo, err := os.Stat(grandParent)
+			if err != nil {
+				return fmt.Errorf("cannot access destination ancestor directory: %w", err)
+			}
+			if grandParentInfo.Mode().Perm()&0200 == 0 {
+				return fmt.Errorf("cannot create destination directory (ancestor not writable)")
+			}
+		} else {
+			return fmt.Errorf("cannot access destination parent directory: %w", err)
+		}
+	} else {
+		// Destination parent exists, check if writable
+		if destParentInfo.Mode().Perm()&0200 == 0 {
+			return fmt.Errorf("destination parent directory not writable (permissions: %o)", destParentInfo.Mode().Perm())
+		}
+	}
+
+	// If it's a file, try opening it to verify access
+	if !info.IsDir() {
+		f, err := os.Open(oldPath)
+		if err != nil {
+			return fmt.Errorf("cannot open source file: %w", err)
+		}
+		f.Close()
+	}
+
+	return nil
 }
 
 // writeOperationLog writes operations to log file for rollback capability

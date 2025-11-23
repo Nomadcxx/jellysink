@@ -304,11 +304,24 @@ func runView(cmd *cobra.Command, args []string) {
 	// Check if user pressed Enter (clean operation)
 	m := finalModel.(ui.Model)
 	if m.ShouldClean() {
-		editedTitles := m.GetEditedTitles()
-		if len(editedTitles) > 0 {
-			performManualRenames(report, editedTitles)
+		resolvedConflicts := m.GetResolvedConflicts()
+		hasResolvedConflicts := false
+		for _, c := range resolvedConflicts {
+			if c.UserDecision != 0 {
+				hasResolvedConflicts = true
+				break
+			}
+		}
+
+		if hasResolvedConflicts {
+			performConflictRenames(report, resolvedConflicts)
 		} else {
-			performClean(report)
+			editedTitles := m.GetEditedTitles()
+			if len(editedTitles) > 0 {
+				performManualRenames(report, editedTitles)
+			} else {
+				performClean(report)
+			}
 		}
 	}
 }
@@ -389,6 +402,79 @@ func loadReport(path string) (reporter.Report, error) {
 	}
 
 	return report, nil
+}
+
+func performConflictRenames(report reporter.Report, conflicts []*scanner.TVTitleResolution) {
+	fmt.Println("\nApplying resolved conflict renames...")
+
+	activeConflicts := 0
+	for _, c := range conflicts {
+		if c.UserDecision != 0 {
+			activeConflicts++
+		}
+	}
+
+	fmt.Printf("Shows to rename: %d\n\n", activeConflicts)
+
+	totalResults := []interface{}{}
+	successCount := 0
+	errorCount := 0
+
+	for _, conflict := range conflicts {
+		if conflict.UserDecision == 0 {
+			continue
+		}
+
+		oldTitle := ""
+		if conflict.FolderMatch != nil {
+			oldTitle = conflict.FolderMatch.Title
+		} else if conflict.FilenameMatch != nil {
+			oldTitle = conflict.FilenameMatch.Title
+		}
+
+		newTitle := conflict.ResolvedTitle
+
+		if oldTitle == "" || newTitle == "" {
+			fmt.Printf("⚠ Skipping conflict with missing title data\n")
+			continue
+		}
+
+		fmt.Printf("\nRenaming: %s -> %s\n", oldTitle, newTitle)
+
+		for _, libPath := range report.LibraryPaths {
+			results, err := scanner.ApplyManualTVRename(libPath, oldTitle, newTitle, false)
+			if err != nil {
+				fmt.Printf("  ✗ Error in %s: %v\n", libPath, err)
+				errorCount++
+				continue
+			}
+
+			for _, result := range results {
+				totalResults = append(totalResults, result)
+				if result.Success {
+					successCount++
+					typeStr := "file"
+					if result.IsFolder {
+						typeStr = "folder"
+					}
+					fmt.Printf("  ✓ Renamed %s: %s\n", typeStr, filepath.Base(result.NewPath))
+				} else {
+					errorCount++
+					fmt.Printf("  ✗ Failed: %s - %s\n", result.OldPath, result.Error)
+				}
+			}
+		}
+	}
+
+	fmt.Println("\nRename operation completed!")
+	fmt.Printf("✓ Successful renames: %d\n", successCount)
+	if errorCount > 0 {
+		fmt.Printf("✗ Errors: %d\n", errorCount)
+	}
+
+	home, _ := os.UserHomeDir()
+	logPath := filepath.Join(home, ".local/share/jellysink/rename.log")
+	fmt.Printf("\nOperation log saved to: %s\n", logPath)
 }
 
 func performManualRenames(report reporter.Report, editedTitles map[int]string) {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -16,6 +17,12 @@ type ComplianceIssue struct {
 	Problem         string // Description of the issue
 	SuggestedPath   string // Suggested compliant path
 	SuggestedAction string // "rename" or "reorganize"
+}
+
+// TVComplianceResult holds both compliance issues and ambiguous shows
+type TVComplianceResult struct {
+	Issues           []ComplianceIssue
+	AmbiguousTVShows []*TVTitleResolution
 }
 
 // ScanMovieCompliance scans for non-Jellyfin-compliant movie folders
@@ -32,7 +39,7 @@ func ScanMovieComplianceWithProgress(paths []string, progressCh chan<- ScanProgr
 		pr = NewProgressReporterWithInterval(progressCh, "compliance_movies", 200*time.Millisecond)
 		pr.send(0, "Counting movie files for compliance check...")
 
-		total, err := CountVideoFiles(paths)
+		total, err := CountVideoFilesWithProgress(paths, pr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to count files: %w", err)
 		}
@@ -228,12 +235,21 @@ func ScanTVCompliance(paths []string, excludePaths ...string) ([]ComplianceIssue
 
 // ScanTVComplianceWithProgress scans for TV compliance issues with progress reporting
 func ScanTVComplianceWithProgress(paths []string, progressCh chan<- ScanProgress, excludePaths ...string) ([]ComplianceIssue, error) {
+	result, err := ScanTVComplianceWithAmbiguous(paths, progressCh, excludePaths...)
+	if err != nil {
+		return nil, err
+	}
+	return result.Issues, nil
+}
+
+// ScanTVComplianceWithAmbiguous scans for TV compliance issues and collects ambiguous shows
+func ScanTVComplianceWithAmbiguous(paths []string, progressCh chan<- ScanProgress, excludePaths ...string) (*TVComplianceResult, error) {
 	var pr *ProgressReporter
 	if progressCh != nil {
 		pr = NewProgressReporterWithInterval(progressCh, "compliance_tv", 200*time.Millisecond)
 		pr.send(0, "Counting TV files for compliance check...")
 
-		total, err := CountVideoFiles(paths)
+		total, err := CountVideoFilesWithProgress(paths, pr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to count files: %w", err)
 		}
@@ -241,6 +257,8 @@ func ScanTVComplianceWithProgress(paths []string, progressCh chan<- ScanProgress
 	}
 
 	var issues []ComplianceIssue
+	var ambiguousShows []*TVTitleResolution
+	seenAmbiguous := make(map[string]bool) // Deduplicate ambiguous shows by folder path
 	filesProcessed := 0
 
 	// Build exclusion set for fast lookup
@@ -293,8 +311,25 @@ func ScanTVComplianceWithProgress(paths []string, progressCh chan<- ScanProgress
 				return nil
 			}
 
+			// Get title resolution
+			resolution := ResolveTVShowTitle(path, libPath)
+
+			// Try API verification for ambiguous titles
+			// Note: API keys should be loaded from config in production
+			// For now, we skip API calls to avoid blocking - this should be improved
+			// by passing config through the call chain
+
+			// Collect ambiguous shows (not API-verified) for manual intervention
+			if resolution.IsAmbiguous && !resolution.APIVerified {
+				showFolder := filepath.Dir(filepath.Dir(path)) // Go up from Season folder to Show folder
+				if !seenAmbiguous[showFolder] {
+					seenAmbiguous[showFolder] = true
+					ambiguousShows = append(ambiguousShows, resolution)
+				}
+			}
+
 			// Check if this is compliant
-			issue := checkTVCompliance(path, libPath, season, episode)
+			issue := checkTVComplianceWithResolution(path, libPath, season, episode, resolution)
 			if issue != nil {
 				issues = append(issues, *issue)
 			}
@@ -308,18 +343,25 @@ func ScanTVComplianceWithProgress(paths []string, progressCh chan<- ScanProgress
 	}
 
 	if pr != nil {
-		pr.Complete(fmt.Sprintf("Found %d compliance issues", len(issues)))
+		pr.Complete(fmt.Sprintf("Found %d compliance issues, %d ambiguous shows", len(issues), len(ambiguousShows)))
 	}
 
-	return issues, nil
+	return &TVComplianceResult{
+		Issues:           issues,
+		AmbiguousTVShows: ambiguousShows,
+	}, nil
 }
 
 // checkTVCompliance checks if a TV episode file follows Jellyfin conventions
 func checkTVCompliance(filePath, libRoot string, season, episode int) *ComplianceIssue {
+	resolution := ResolveTVShowTitle(filePath, libRoot)
+	return checkTVComplianceWithResolution(filePath, libRoot, season, episode, resolution)
+}
+
+// checkTVComplianceWithResolution checks TV compliance with pre-computed resolution
+func checkTVComplianceWithResolution(filePath, libRoot string, season, episode int, resolution *TVTitleResolution) *ComplianceIssue {
 	filename := filepath.Base(filePath)
 	seasonDir := filepath.Base(filepath.Dir(filePath))
-
-	resolution := ResolveTVShowTitle(filePath, libRoot)
 
 	var cleanShowName string
 	if resolution.IsAmbiguous {
@@ -500,6 +542,37 @@ func applyMovieComplianceInternal(issue ComplianceIssue) error {
 
 	// Check if target already exists
 	if _, err := os.Stat(issue.SuggestedPath); err == nil {
+		// Check if source and target are the same file (hardlink or same inode)
+		srcInfo, err := os.Stat(issue.Path)
+		if err != nil {
+			return fmt.Errorf("cannot stat source file: %w", err)
+		}
+
+		targetInfo, err := os.Stat(issue.SuggestedPath)
+		if err != nil {
+			return fmt.Errorf("cannot stat target file: %w", err)
+		}
+
+		// Compare inodes (Unix-specific but works on Linux)
+		srcSys := srcInfo.Sys().(*syscall.Stat_t)
+		targetSys := targetInfo.Sys().(*syscall.Stat_t)
+
+		if srcSys.Ino == targetSys.Ino {
+			// Same file (hardlink) - just delete the source and clean up empty dirs
+			if err := os.Remove(issue.Path); err != nil {
+				return fmt.Errorf("failed to remove hardlinked duplicate: %w", err)
+			}
+
+			// Clean up empty directory
+			originalDir := filepath.Dir(issue.Path)
+			if entries, err := os.ReadDir(originalDir); err == nil && len(entries) == 0 {
+				_ = os.Remove(originalDir)
+			}
+
+			return nil
+		}
+
+		// Different files with same target path - this is a real collision
 		return fmt.Errorf("target file already exists: %s", issue.SuggestedPath)
 	}
 
@@ -589,6 +662,43 @@ func applyTVComplianceInternal(issue ComplianceIssue) error {
 
 	// Check if target file already exists
 	if _, err := os.Stat(issue.SuggestedPath); err == nil {
+		// Check if source and target are the same file (hardlink or same inode)
+		srcInfo, err := os.Stat(issue.Path)
+		if err != nil {
+			return fmt.Errorf("cannot stat source file: %w", err)
+		}
+
+		targetInfo, err := os.Stat(issue.SuggestedPath)
+		if err != nil {
+			return fmt.Errorf("cannot stat target file: %w", err)
+		}
+
+		// Compare inodes (Unix-specific but works on Linux)
+		srcSys := srcInfo.Sys().(*syscall.Stat_t)
+		targetSys := targetInfo.Sys().(*syscall.Stat_t)
+
+		if srcSys.Ino == targetSys.Ino {
+			// Same file (hardlink) - just delete the source and clean up empty dirs
+			if err := os.Remove(issue.Path); err != nil {
+				return fmt.Errorf("failed to remove hardlinked duplicate: %w", err)
+			}
+
+			// Clean up empty directories
+			originalDir := filepath.Dir(issue.Path)
+			if entries, err := os.ReadDir(originalDir); err == nil && len(entries) == 0 {
+				_ = os.Remove(originalDir)
+
+				// Clean up parent if also empty
+				originalParentDir := filepath.Dir(originalDir)
+				if entries, err := os.ReadDir(originalParentDir); err == nil && len(entries) == 0 {
+					_ = os.Remove(originalParentDir)
+				}
+			}
+
+			return nil
+		}
+
+		// Different files with same target path - this is a real collision
 		return fmt.Errorf("target file already exists: %s", issue.SuggestedPath)
 	}
 

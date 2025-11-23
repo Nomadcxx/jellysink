@@ -561,23 +561,6 @@ func min(a, b, c int) int {
 // stripOrphanedReleaseGroups removes common release group names that remain after stripping markers
 // These are typically alphanumeric strings with mixed case (e.g., "D3FiL3R", "RARBG", "YTS")
 func stripOrphanedReleaseGroups(name string) string {
-	// Common release group patterns (exact matches only, case-insensitive)
-	knownGroups := map[string]bool{
-		"rarbg": true, "yts": true, "yify": true, "etrg": true, "fgt": true, "mkvcage": true,
-		"stuttershit": true, "sparks": true, "rovers": true, "phoenix": true, "cmrg": true,
-		"evo": true, "ion10": true, "psa": true, "afg": true, "sampa": true, "tgx": true, "snake": true,
-		"d3fil3r": true, "fistworld": true, "crys": true, "handjob": true, "rightsize": true,
-		"ntb": true, "ntg": true, "getit": true, "pignus": true, "btn": true, "don": true, "ctrlhd": true,
-		"mag": true, "psychd": true, "ml": true, "mirc": true, "mircrew": true, "chameleon": true, "cinemix": true,
-		"will1869": true, "aspide": true, "nueng": true,
-	}
-
-	// Acronyms that should NOT be removed even if they match known groups
-	// These are common TV show/movie acronyms that happen to conflict with release group names
-	preservedAcronyms := map[string]bool{
-		"tng": true, // Star Trek: The Next Generation (conflicts with NTG release group)
-	}
-
 	words := strings.Fields(name)
 
 	// Only remove known groups from the tail. This avoids stripping title words in the middle.
@@ -591,12 +574,12 @@ func stripOrphanedReleaseGroups(name string) string {
 		lastLower := strings.ToLower(last)
 
 		// Don't remove if it's a preserved acronym
-		if preservedAcronyms[lastLower] {
+		if IsPreservedAcronym(lastLower) {
 			break
 		}
 
 		// If the last word is in the known groups, remove it
-		if _, ok := knownGroups[lastLower]; ok {
+		if IsKnownReleaseGroup(lastLower) {
 			words = words[:len(words)-1]
 			continue
 		}
@@ -636,6 +619,116 @@ func stripOrphanedReleaseGroups(name string) string {
 	}
 
 	return strings.Join(words, " ")
+}
+
+// IsGarbageTitle checks if a title contains non-dictionary garbage from release groups
+// Returns true if the title appears to be release group artifacts rather than real content
+func IsGarbageTitle(title string) bool {
+	if title == "" {
+		return true
+	}
+
+	// Split into words
+	words := strings.Fields(title)
+	if len(words) == 0 {
+		return true
+	}
+
+	// Single-word titles: be conservative - only flag if highly suspicious
+	if len(words) == 1 {
+		word := words[0]
+		wordLower := strings.ToLower(word)
+
+		// Check if it's a codec marker (definitely garbage)
+		if IsCodecMarker(wordLower) {
+			return true
+		}
+
+		// Check if it's a known release group (probably garbage unless preserved)
+		if IsKnownReleaseGroup(wordLower) && !IsPreservedAcronym(wordLower) {
+			return true
+		}
+
+		// Check for mixed letter+digit patterns (x264, H264, etc.)
+		hasDigit := false
+		hasLetter := false
+		for _, ch := range word {
+			if ch >= '0' && ch <= '9' {
+				hasDigit = true
+			}
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+				hasLetter = true
+			}
+		}
+		if hasLetter && hasDigit {
+			return true
+		}
+
+		// Otherwise, single words might be legitimate titles (Rome, IT, etc.)
+		return false
+	}
+
+	// Multi-word titles: check each word for garbage patterns
+	garbageCount := 0
+	for _, word := range words {
+		wordLower := strings.ToLower(word)
+
+		// Check against known release groups (only in multi-word context)
+		if IsKnownReleaseGroup(wordLower) {
+			garbageCount++
+			continue
+		}
+
+		// Heuristics for garbage detection:
+		// 1. Mixed case with numbers (e.g., "x264", "H264")
+		hasDigit := false
+		hasLetter := false
+		for _, ch := range word {
+			if ch >= '0' && ch <= '9' {
+				hasDigit = true
+			}
+			if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+				hasLetter = true
+			}
+		}
+		if hasLetter && hasDigit {
+			garbageCount++
+			continue
+		}
+
+		// 2. All caps short words (likely acronyms/groups)
+		if len(word) <= 6 && strings.ToUpper(word) == word && strings.ToLower(word) != word {
+			// Allow common valid all-caps words
+			if !IsAllCapsLegitTitle(wordLower) {
+				garbageCount++
+				continue
+			}
+		}
+
+		// 3. Leetspeak patterns (e.g., "D3FiL3R", "3Audio")
+		hasLeetPattern := false
+		for i, ch := range word {
+			if ch >= '0' && ch <= '9' {
+				// Number in middle of word with mixed case = leetspeak
+				if i > 0 && i < len(word)-1 {
+					hasLeetPattern = true
+					break
+				}
+			}
+		}
+		if hasLeetPattern {
+			garbageCount++
+			continue
+		}
+	}
+
+	// If more than 50% of words are garbage, the whole title is garbage
+	if len(words) <= 2 && garbageCount > 0 {
+		return true // Single or two-word titles must be clean
+	}
+
+	garbageRatio := float64(garbageCount) / float64(len(words))
+	return garbageRatio >= 0.5
 }
 
 // CleanMovieName converts release group folder to clean Jellyfin format
