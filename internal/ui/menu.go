@@ -1565,6 +1565,7 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.stats.FilesProcessed = msg.FilesProcessed
 		m.stats.DuplicatesFound = msg.DuplicatesFound
 		m.stats.ComplianceIssues = msg.ComplianceIssues
+		m.stats.ErrorsEncountered = msg.ErrorsEncountered
 
 		// Start time: prefer progress StartTime if provided
 		if m.startTime.IsZero() && !msg.StartTime.IsZero() {
@@ -1580,6 +1581,19 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.eta = time.Duration(float64(remaining)/rate) * time.Second
 			}
 		}
+
+		// Update operation state
+		op := msg.Operation
+		st := opState{
+			Operation:  op,
+			Stage:      msg.Stage,
+			Percentage: msg.Percentage,
+			Message:    msg.Message,
+		}
+		if _, exists := m.opStates[op]; !exists {
+			m.opOrder = append(m.opOrder, op)
+		}
+		m.opStates[op] = st
 
 		// Add to log buffer (max 1000 lines)
 		logEntry := fmt.Sprintf("[%02d:%02d] [%s] %s",

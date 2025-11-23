@@ -10,7 +10,13 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Nomadcxx/jellysink/internal/reporter"
+	"github.com/Nomadcxx/jellysink/internal/scanner"
 )
+
+// Custom messages for progress updates
+type progressMsg scanner.ScanProgress
+type scanCompleteMsg reporter.Report
+type scanErrorMsg error
 
 // ViewMode represents the current TUI view
 type ViewMode int
@@ -20,6 +26,7 @@ const (
 	ViewDuplicates
 	ViewCompliance
 	ViewManualIntervention
+	ViewScanning
 )
 
 // Model represents the TUI state
@@ -35,6 +42,13 @@ type Model struct {
 	editingTitle           bool
 	titleInput             textinput.Model
 	editedTitles           map[int]string
+
+	// Scanning state
+	scanning        bool
+	scanLogs        []string
+	currentProgress string
+	progressPercent float64
+	cancelled       bool
 }
 
 // NewModel creates a new TUI model with a scan report
@@ -60,6 +74,40 @@ func (m Model) Init() tea.Cmd {
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case progressMsg:
+		// Update scanning progress
+		m.currentProgress = msg.Message
+		m.progressPercent = msg.Percentage
+
+		// Add to log buffer (keep last 100 lines)
+		logLine := fmt.Sprintf("[%02d:%02d] %s", msg.ElapsedSeconds/60, msg.ElapsedSeconds%60, msg.Message)
+		m.scanLogs = append(m.scanLogs, logLine)
+		if len(m.scanLogs) > 1000 {
+			m.scanLogs = m.scanLogs[len(m.scanLogs)-1000:]
+		}
+
+		// Update viewport content
+		if m.mode == ViewScanning {
+			m.viewport.SetContent(m.renderScanning())
+			m.viewport.GotoBottom()
+		}
+		return m, nil
+
+	case scanCompleteMsg:
+		// Scan finished - switch to summary
+		m.scanning = false
+		m.report = reporter.Report(msg)
+		m.mode = ViewSummary
+		m.viewport.SetContent(m.renderSummary())
+		return m, nil
+
+	case scanErrorMsg:
+		// Scan error - show error and exit
+		m.scanning = false
+		m.scanLogs = append(m.scanLogs, fmt.Sprintf("ERROR: %v", msg))
+		m.viewport.SetContent(m.renderScanning())
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.editingTitle {
 			switch msg.String() {
@@ -89,6 +137,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.mode == ViewScanning {
+				m.cancelled = true
+				m.scanLogs = append(m.scanLogs, "Cancelling scan...")
+			}
 			return m, tea.Quit
 
 		case "esc":
@@ -246,6 +298,13 @@ func (m Model) View() string {
 			FormatKeybinding("E", "Edit Title"),
 			FormatKeybinding("Enter", "Apply Renames"),
 			FormatKeybinding("Esc", "Back"),
+		)
+
+	case ViewScanning:
+		header = FormatHeader("SCANNING IN PROGRESS")
+		footer = FormatFooter(
+			FormatKeybinding("Ctrl+C", "Cancel Scan"),
+			MutedStyle.Render("Please wait..."),
 		)
 	}
 
@@ -548,6 +607,58 @@ func (m Model) renderManualIntervention() string {
 	sb.WriteString(WarningStyle.Render("Note: Renames will be applied to both folders and filenames for consistency.") + "\n")
 
 	return sb.String()
+}
+
+// renderScanning renders the scanning progress view
+func (m Model) renderScanning() string {
+	var sb strings.Builder
+
+	// ASCII header
+	sb.WriteString(FormatASCIIHeader() + "\n\n")
+
+	// Progress bar
+	progressBar := renderProgressBar(m.progressPercent, 50)
+	sb.WriteString(progressBar + "\n")
+	sb.WriteString(fmt.Sprintf("  %s %.1f%%\n\n", m.currentProgress, m.progressPercent))
+
+	// Log viewport (last 20 lines)
+	sb.WriteString(TitleStyle.Render("SCAN LOG") + "\n")
+	sb.WriteString(strings.Repeat("─", 80) + "\n")
+
+	startIdx := 0
+	if len(m.scanLogs) > 20 {
+		startIdx = len(m.scanLogs) - 20
+	}
+
+	for i := startIdx; i < len(m.scanLogs); i++ {
+		sb.WriteString(MutedStyle.Render(m.scanLogs[i]) + "\n")
+	}
+
+	if m.cancelled {
+		sb.WriteString("\n" + ErrorStyle.Render("Scan cancelled by user") + "\n")
+	}
+
+	return sb.String()
+}
+
+// renderProgressBar creates a text-based progress bar
+func renderProgressBar(percent float64, width int) string {
+	filled := int((percent / 100.0) * float64(width))
+	if filled > width {
+		filled = width
+	}
+
+	bar := "["
+	for i := 0; i < width; i++ {
+		if i < filled {
+			bar += "█"
+		} else {
+			bar += " "
+		}
+	}
+	bar += "]"
+
+	return SuccessStyle.Render(bar)
 }
 
 // Helper functions

@@ -54,14 +54,30 @@ func NewProgressReporter(ch chan<- ScanProgress, operation string) *ProgressRepo
 	}
 }
 
-// Start sends initial progress with total count
+// Start sends initial progress with total count and counting stage
 func (pr *ProgressReporter) Start(total int, message string) {
 	pr.total = total
-	pr.send(0, message)
+	progress := ScanProgress{
+		Operation:         pr.operation,
+		Stage:             "counting_files",
+		Current:           0,
+		Total:             pr.total,
+		Percentage:        0.0,
+		Message:           message,
+		StartTime:         pr.startTime,
+		ElapsedSeconds:    int(time.Since(pr.startTime).Seconds()),
+		FilesProcessed:    pr.filesProcessed,
+		DuplicatesFound:   pr.duplicatesFound,
+		ComplianceIssues:  pr.complianceIssues,
+		ErrorsEncountered: pr.errorsEncountered,
+		Errors:            pr.errors,
+	}
+	pr.ch <- progress
 }
 
-// Update sends progress update
+// Update sends progress update (scanning stage)
 func (pr *ProgressReporter) Update(current int, message string) {
+	pr.filesProcessed = current
 	pr.send(current, message)
 }
 
