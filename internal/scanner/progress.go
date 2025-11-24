@@ -322,18 +322,27 @@ func CountVideoFiles(paths []string) (int, error) {
 func CountVideoFilesWithProgress(paths []string, pr *ProgressReporter) (int, error) {
 	count := 0
 	directoriesScanned := 0
+	skippedPaths := []string{}
+	accessiblePaths := 0
 
 	for _, libPath := range paths {
 		if _, err := os.Stat(libPath); err != nil {
-			return 0, fmt.Errorf("library path not accessible: %s: %w", libPath, err)
+			skippedPaths = append(skippedPaths, libPath)
+			if pr != nil {
+				pr.Send("warn", fmt.Sprintf("Skipping inaccessible path: %s (%v)", libPath, err))
+			}
+			continue
 		}
+		accessiblePaths++
 
 		err := filepath.Walk(libPath, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
-				return err
+				if pr != nil {
+					pr.Send("warn", fmt.Sprintf("Error accessing %s: %v (continuing)", path, err))
+				}
+				return nil
 			}
 
-			// Report progress every 100 directories
 			if info.IsDir() {
 				directoriesScanned++
 				if pr != nil && directoriesScanned%100 == 0 {
@@ -343,7 +352,6 @@ func CountVideoFilesWithProgress(paths []string, pr *ProgressReporter) (int, err
 
 			if !info.IsDir() && isVideoFile(path) {
 				count++
-				// Also report every 500 files found
 				if pr != nil && count%500 == 0 {
 					pr.Send("info", fmt.Sprintf("Counting files... (%d found so far)", count))
 				}
@@ -353,8 +361,18 @@ func CountVideoFilesWithProgress(paths []string, pr *ProgressReporter) (int, err
 		})
 
 		if err != nil {
-			return 0, fmt.Errorf("error counting files in %s: %w", libPath, err)
+			if pr != nil {
+				pr.Send("warn", fmt.Sprintf("Error walking %s: %v (continuing)", libPath, err))
+			}
 		}
+	}
+
+	if accessiblePaths == 0 {
+		return 0, fmt.Errorf("no accessible library paths found (checked %d paths)", len(paths))
+	}
+
+	if len(skippedPaths) > 0 && pr != nil {
+		pr.Send("warn", fmt.Sprintf("Completed with %d skipped paths", len(skippedPaths)))
 	}
 
 	return count, nil

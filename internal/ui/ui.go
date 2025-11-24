@@ -1540,18 +1540,41 @@ func (m *Model) runBatchRename() tea.Cmd {
 			}
 
 			// Apply rename for this show
-			// We need to pass the parent directory (library path) not the show folder itself
-			basePath := filepath.Dir(conflict.FolderPath)
-			// Compute oldTitle based on folder match or filename match (fallback to ResolvedTitle)
-			oldTitle := ""
-			if conflict.FolderMatch != nil {
-				oldTitle = conflict.FolderMatch.Title
-			} else if conflict.FilenameMatch != nil {
-				oldTitle = conflict.FilenameMatch.Title
-			} else {
-				// As a last resort, extract title from folder path
-				oldTitle, _ = scanner.ExtractTVShowTitle(filepath.Base(conflict.FolderPath))
+			// SAFETY CHECK: Validate FolderPath before computing basePath
+			// FolderPath should be: /mnt/STORAGE#/TVSHOWS/ShowName (Year)
+			// basePath will be: /mnt/STORAGE#/TVSHOWS
+			//
+			// If FolderPath is already a storage root (e.g., /mnt/STORAGE1), then:
+			// basePath becomes /mnt, which is DISASTROUS
+			if conflict.FolderPath == "" {
+				pr.SendSeverityImmediate("error", "Empty folder path - skipping")
+				errorCount++
+				continue
 			}
+
+			// Count directory depth - should have at least 3 components after root
+			// e.g., /mnt/STORAGE1/TVSHOWS/Show Name (Year)
+			parts := strings.Split(strings.TrimPrefix(conflict.FolderPath, "/"), "/")
+			if len(parts) < 3 {
+				pr.SendSeverityImmediate("error", fmt.Sprintf("Invalid folder depth (too shallow): %s - SKIPPING", conflict.FolderPath))
+				errorCount++
+				continue
+			}
+
+			basePath := filepath.Dir(conflict.FolderPath)
+
+			// Additional safety: basePath should end with "TVSHOWS" or similar library folder
+			basePathName := filepath.Base(basePath)
+			if !strings.Contains(strings.ToUpper(basePathName), "TVSHOW") &&
+				!strings.Contains(strings.ToUpper(basePathName), "TV") &&
+				!strings.Contains(strings.ToUpper(basePathName), "SERIES") {
+				pr.SendSeverityImmediate("error", fmt.Sprintf("basePath doesn't look like TV library: %s - SKIPPING", basePath))
+				errorCount++
+				continue
+			}
+
+			// Extract oldTitle from the CURRENT folder name (what's on disk now)
+			oldTitle, _ := scanner.ExtractTVShowTitle(filepath.Base(conflict.FolderPath))
 
 			results, err := scanner.ApplyManualTVRenameWithProgress(
 				basePath,

@@ -44,8 +44,8 @@ func ApplyManualTVRenameWithProgress(basePath, oldTitle, newTitle string, dryRun
 		return results, fmt.Errorf("new title contains invalid characters")
 	}
 
-	normalizedOld := strings.ToLower(NormalizeName(oldTitle))
-	normalizedNew := strings.ToLower(NormalizeName(newTitle))
+	normalizedOld := strings.ToLower(strings.TrimSpace(oldTitle))
+	normalizedNew := strings.ToLower(strings.TrimSpace(newTitle))
 
 	if normalizedOld == normalizedNew {
 		if pr != nil {
@@ -54,11 +54,63 @@ func ApplyManualTVRenameWithProgress(basePath, oldTitle, newTitle string, dryRun
 		return results, fmt.Errorf("old and new titles are the same")
 	}
 
+	// CRITICAL SAFETY CHECK: Validate basePath is not a storage root
+	// basePath should be a library path like /mnt/STORAGE#/TVSHOWS
+	// NEVER /mnt, /mnt/STORAGE#, or / itself
+	if basePath == "" {
+		if pr != nil {
+			pr.LogError(fmt.Errorf("basePath is empty"), "Invalid base path")
+		}
+		return results, fmt.Errorf("basePath cannot be empty")
+	}
+
+	// Normalize basePath
+	basePath = filepath.Clean(basePath)
+
+	// Count path components - must have at least 3 after root
+	// e.g., /mnt/STORAGE1/TVSHOWS = ["", "mnt", "STORAGE1", "TVSHOWS"]
+	parts := strings.Split(basePath, string(filepath.Separator))
+	if len(parts) < 4 {
+		err := fmt.Errorf("basePath is too shallow (possible storage root): %s", basePath)
+		if pr != nil {
+			pr.LogError(err, "SAFETY CHECK FAILED")
+		}
+		return results, err
+	}
+
+	// Check for protected paths
+	protectedPaths := []string{"/", "/mnt", "/home", "/usr", "/etc", "/var", "/opt", "/root"}
+	for _, protected := range protectedPaths {
+		if basePath == protected || basePath == protected+"/" {
+			err := fmt.Errorf("basePath is a protected system path: %s", basePath)
+			if pr != nil {
+				pr.LogError(err, "SAFETY CHECK FAILED")
+			}
+			return results, err
+		}
+	}
+
+	// Verify basePath exists and is a directory
+	info, err := os.Stat(basePath)
+	if err != nil {
+		if pr != nil {
+			pr.LogError(err, fmt.Sprintf("basePath does not exist: %s", basePath))
+		}
+		return results, fmt.Errorf("basePath does not exist: %s: %w", basePath, err)
+	}
+	if !info.IsDir() {
+		err := fmt.Errorf("basePath is not a directory: %s", basePath)
+		if pr != nil {
+			pr.LogError(err, "Invalid base path")
+		}
+		return results, err
+	}
+
 	if pr != nil {
 		pr.Update(10, "Scanning directories")
 	}
 
-	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if pr != nil {
 				pr.LogError(err, fmt.Sprintf("Failed to access path: %s", path))
@@ -72,142 +124,68 @@ func ApplyManualTVRenameWithProgress(basePath, oldTitle, newTitle string, dryRun
 
 		dirName := filepath.Base(path)
 
-		// Extract and normalize folder title using existing extractor to handle release groups
-		folderTitle, year := ExtractTVShowTitle(dirName)
-		normalizedFolderTitle := strings.ToLower(NormalizeName(folderTitle))
+		tvTitlePattern := regexp.MustCompile(`^(.+?)\s*\((\d{4})\)$`)
+		matches := tvTitlePattern.FindStringSubmatch(dirName)
 
-		// Check if folder matches the old title OR if there are files inside that match oldTitle (filename match)
-		if normalizedFolderTitle == normalizedOld {
-			// full match on folder title
-			var newFolderName string
-			if year != "" {
-				newFolderName = fmt.Sprintf("%s (%s)", newTitle, year)
-			} else {
-				newFolderName = newTitle
-			}
-			newFolderPath := filepath.Join(filepath.Dir(path), newFolderName)
+		if len(matches) == 3 {
+			folderTitle := matches[1]
+			year := matches[2]
+			normalizedFolderTitle := strings.ToLower(strings.TrimSpace(folderTitle))
 
-			if pr != nil {
-				pr.Update(50, fmt.Sprintf("Renaming episodes in: %s", dirName))
-			}
+			if normalizedFolderTitle == normalizedOld {
+				newFolderName := fmt.Sprintf("%s (%s)", newTitle, year)
+				newFolderPath := filepath.Join(filepath.Dir(path), newFolderName)
 
-			episodeResults, err := renameEpisodesInFolderWithProgress(path, oldTitle, newTitle, dryRun, pr)
-			if err != nil {
 				if pr != nil {
-					pr.LogError(err, fmt.Sprintf("Failed to rename episodes in: %s", dirName))
+					pr.Update(50, fmt.Sprintf("Renaming episodes in: %s", dirName))
 				}
+
+				episodeResults, err := renameEpisodesInFolderWithProgress(path, oldTitle, newTitle, dryRun, pr)
+				if err != nil {
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Failed to rename episodes in: %s", dirName))
+					}
+					results = append(results, RenameResult{
+						OldPath:  path,
+						NewPath:  newFolderPath,
+						IsFolder: true,
+						Success:  false,
+						Error:    fmt.Sprintf("failed to rename episodes: %v", err),
+					})
+					return nil
+				}
+				results = append(results, episodeResults...)
+
+				if pr != nil {
+					pr.Update(90, fmt.Sprintf("Renaming folder: %s", dirName))
+				}
+
+				if !dryRun {
+					if err := os.Rename(path, newFolderPath); err != nil {
+						if pr != nil {
+							pr.LogError(err, fmt.Sprintf("Failed to rename folder: %s", dirName))
+						}
+						results = append(results, RenameResult{
+							OldPath:  path,
+							NewPath:  newFolderPath,
+							IsFolder: true,
+							Success:  false,
+							Error:    err.Error(),
+						})
+						return nil
+					}
+				}
+
 				results = append(results, RenameResult{
 					OldPath:  path,
 					NewPath:  newFolderPath,
 					IsFolder: true,
-					Success:  false,
-					Error:    fmt.Sprintf("failed to rename episodes: %v", err),
+					Success:  true,
 				})
-				return nil
-			}
-			results = append(results, episodeResults...)
 
-			if pr != nil {
-				pr.Update(90, fmt.Sprintf("Renaming folder: %s", dirName))
-			}
-
-			if !dryRun {
-				if err := os.Rename(path, newFolderPath); err != nil {
-					if pr != nil {
-						pr.LogError(err, fmt.Sprintf("Failed to rename folder: %s", dirName))
-					}
-					results = append(results, RenameResult{
-						OldPath:  path,
-						NewPath:  newFolderPath,
-						IsFolder: true,
-						Success:  false,
-						Error:    err.Error(),
-					})
-					return nil
-				}
-			}
-
-			results = append(results, RenameResult{
-				OldPath:  path,
-				NewPath:  newFolderPath,
-				IsFolder: true,
-				Success:  true,
-			})
-
-			return filepath.SkipDir
-		}
-
-		// If folder title doesn't match the old title, check if files within the folder match oldTitle
-		prUpdate := func(msg string) {
-			if pr != nil {
-				pr.Update(20, msg)
+				return filepath.SkipDir
 			}
 		}
-
-		prUpdate(fmt.Sprintf("Scanning files in: %s", dirName))
-		// Dry-run detect any episodes that contain oldTitle
-		detectResults, _ := renameEpisodesInFolderWithProgress(path, oldTitle, newTitle, true, pr)
-		if len(detectResults) > 0 {
-			// We have episode matches, perform actual rename
-			if pr != nil {
-				pr.Update(50, fmt.Sprintf("Renaming episodes in: %s", dirName))
-			}
-			episodeResults, err := renameEpisodesInFolderWithProgress(path, oldTitle, newTitle, dryRun, pr)
-			if err != nil {
-				if pr != nil {
-					pr.LogError(err, fmt.Sprintf("Failed to rename episodes in: %s", dirName))
-				}
-				results = append(results, RenameResult{
-					OldPath:  path,
-					NewPath:  filepath.Join(filepath.Dir(path), newTitle),
-					IsFolder: true,
-					Success:  false,
-					Error:    fmt.Sprintf("failed to rename episodes: %v", err),
-				})
-				return nil
-			}
-			results = append(results, episodeResults...)
-
-			// Compute folder rename target
-			var newFolderName string
-			if year != "" {
-				newFolderName = fmt.Sprintf("%s (%s)", newTitle, year)
-			} else {
-				newFolderName = newTitle
-			}
-			newFolderPath := filepath.Join(filepath.Dir(path), newFolderName)
-
-			if pr != nil {
-				pr.Update(90, fmt.Sprintf("Renaming folder: %s", dirName))
-			}
-
-			if !dryRun {
-				if err := os.Rename(path, newFolderPath); err != nil {
-					if pr != nil {
-						pr.LogError(err, fmt.Sprintf("Failed to rename folder: %s", dirName))
-					}
-					results = append(results, RenameResult{
-						OldPath:  path,
-						NewPath:  newFolderPath,
-						IsFolder: true,
-						Success:  false,
-						Error:    err.Error(),
-					})
-					return nil
-				}
-			}
-
-			results = append(results, RenameResult{
-				OldPath:  path,
-				NewPath:  newFolderPath,
-				IsFolder: true,
-				Success:  true,
-			})
-
-			return filepath.SkipDir
-		}
-
-		return nil
 
 		return nil
 	})
@@ -260,41 +238,47 @@ func renameEpisodesInFolderWithProgress(folderPath, oldTitle, newTitle string, d
 		normalizedOld := strings.ToLower(oldTitle)
 
 		if strings.Contains(normalizedFileName, normalizedOld) {
-			// Build a new filename using the new title and episode code for consistency
-			parts := episodePattern.Split(nameWithoutExt, -1)
-			episodeCode := episodePattern.FindString(nameWithoutExt)
-			if len(parts) > 0 && episodeCode != "" {
-				suffix := ""
-				if len(parts) > 1 {
-					suffix = parts[1]
-				}
-				newFileName := newTitle + " " + episodeCode + suffix + ext
-				newPath := filepath.Join(filepath.Dir(path), newFileName)
+			newFileName := strings.Replace(nameWithoutExt, oldTitle, newTitle, 1)
 
-				if !dryRun {
-					if err := os.Rename(path, newPath); err != nil {
-						if pr != nil {
-							pr.LogError(err, fmt.Sprintf("Failed to rename: %s", fileName))
-						}
-						results = append(results, RenameResult{
-							OldPath:  path,
-							NewPath:  newPath,
-							IsFolder: false,
-							Success:  false,
-							Error:    err.Error(),
-						})
-						return nil
+			if strings.ToLower(nameWithoutExt) != strings.ToLower(newFileName) {
+				newFileName = nameWithoutExt
+				parts := episodePattern.Split(nameWithoutExt, -1)
+				episodeCode := episodePattern.FindString(nameWithoutExt)
+
+				if len(parts) > 0 && episodeCode != "" {
+					suffix := ""
+					if len(parts) > 1 {
+						suffix = parts[1]
 					}
+					newFileName = newTitle + " " + episodeCode + suffix
 				}
-
-				results = append(results, RenameResult{
-					OldPath:  path,
-					NewPath:  newPath,
-					IsFolder: false,
-					Success:  true,
-				})
-				return nil
 			}
+
+			newFileName = newFileName + ext
+			newPath := filepath.Join(filepath.Dir(path), newFileName)
+
+			if !dryRun {
+				if err := os.Rename(path, newPath); err != nil {
+					if pr != nil {
+						pr.LogError(err, fmt.Sprintf("Failed to rename: %s", fileName))
+					}
+					results = append(results, RenameResult{
+						OldPath:  path,
+						NewPath:  newPath,
+						IsFolder: false,
+						Success:  false,
+						Error:    err.Error(),
+					})
+					return nil
+				}
+			}
+
+			results = append(results, RenameResult{
+				OldPath:  path,
+				NewPath:  newPath,
+				IsFolder: false,
+				Success:  true,
+			})
 		}
 
 		return nil

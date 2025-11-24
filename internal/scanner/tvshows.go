@@ -36,26 +36,37 @@ func ScanTVShowsWithProgress(paths []string, progressCh chan<- ScanProgress) ([]
 	var pr *ProgressReporter
 	if progressCh != nil {
 		pr = NewProgressReporterWithInterval(progressCh, "scanning_tv", 200*time.Millisecond)
-		pr.StageUpdate("counting_files", "Counting TV files...")
+		pr.StageUpdate("validating", "Validating library paths...")
 
-		total, err := CountVideoFiles(paths)
-		if err != nil {
-			return nil, fmt.Errorf("failed to count files: %w", err)
+		if err := ValidateBeforeScan(paths, "TV scan", pr); err != nil {
+			pr.LogCritical(err, "Pre-scan validation failed")
+			return nil, fmt.Errorf("validation failed: %w", err)
 		}
-		pr.Start(total, fmt.Sprintf("Scanning %d TV files...", total))
+
+		pr.StageUpdate("counting_files", "Counting TV files...")
+		total, err := CountVideoFilesWithProgress(paths, pr)
+		if err != nil {
+			pr.LogCritical(err, "Failed to count TV files")
+			return nil, fmt.Errorf("failed to count TV files: %w", err)
+		}
+
+		if total == 0 {
+			pr.Send("warn", "No video files found in accessible paths")
+			return []TVDuplicate{}, nil
+		}
+
+		pr.Start(total, fmt.Sprintf("Scanning %d TV files for duplicates...", total))
 	}
 
-	// Map: normalized_show|S##E## -> []TVFile
 	episodeGroups := make(map[string]*TVDuplicate)
 	filesProcessed := 0
 
 	for _, libPath := range paths {
-		// Verify path exists
 		if _, err := os.Stat(libPath); err != nil {
 			if pr != nil {
-				pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+				pr.Send("warn", fmt.Sprintf("Skipping inaccessible path: %s", libPath))
 			}
-			return nil, fmt.Errorf("library path not accessible: %s: %w", libPath, err)
+			continue
 		}
 
 		// Walk directory tree

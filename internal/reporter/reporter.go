@@ -27,6 +27,7 @@ type Report struct {
 	TVDuplicates       []scanner.TVDuplicate
 	ComplianceIssues   []scanner.ComplianceIssue
 	AmbiguousTVShows   []*scanner.TVTitleResolution // TV shows needing manual review
+	LooseFiles         []scanner.LooseFile          // Files not in proper Jellyfin structure
 	TotalDuplicates    int
 	TotalFilesToDelete int
 	SpaceToFree        int64
@@ -411,6 +412,53 @@ func buildSummaryReport(report Report) string {
 	}
 	sb.WriteString("\n")
 
+	// Loose files summary
+	if len(report.LooseFiles) > 0 {
+		sb.WriteString("LOOSE FILES\n")
+		sb.WriteString(strings.Repeat("-", 80) + "\n")
+
+		looseTV := 0
+		looseMovie := 0
+		looseSkipped := 0
+		var totalSize int64
+
+		for _, f := range report.LooseFiles {
+			if f.Action == "skip" {
+				looseSkipped++
+			} else {
+				if f.Type == "tv" {
+					looseTV++
+				} else {
+					looseMovie++
+				}
+				totalSize += f.Size
+			}
+		}
+
+		sb.WriteString(fmt.Sprintf("TV episodes to organize: %d\n", looseTV))
+		sb.WriteString(fmt.Sprintf("Movies to organize: %d\n", looseMovie))
+		sb.WriteString(fmt.Sprintf("Skipped (unknown): %d\n", looseSkipped))
+		sb.WriteString(fmt.Sprintf("Total size: %s\n\n", formatBytes(totalSize)))
+
+		if len(report.LooseFiles) > 0 {
+			sb.WriteString(fmt.Sprintf("Examples (first %d):\n", MaxExampleOffenders))
+			limit := MaxExampleOffenders
+			if len(report.LooseFiles) < limit {
+				limit = len(report.LooseFiles)
+			}
+			for i := 0; i < limit; i++ {
+				f := report.LooseFiles[i]
+				sb.WriteString(fmt.Sprintf("  %d. [%s] %s\n", i+1, strings.ToUpper(f.Type), filepath.Base(f.Path)))
+				if f.Action == "skip" {
+					sb.WriteString(fmt.Sprintf("     Status: SKIP - %s\n", f.SkipReason))
+				} else {
+					sb.WriteString(fmt.Sprintf("     Will move to: %s\n", filepath.Base(filepath.Dir(f.SuggestedPath))))
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
+
 	if len(report.ComplianceIssues) > 0 {
 		sb.WriteString(fmt.Sprintf("Examples (first %d):\n", MaxExampleOffenders))
 		limit := MaxExampleOffenders
@@ -433,6 +481,9 @@ func buildSummaryReport(report Report) string {
 	sb.WriteString("  [F2] View full compliance report (page up/down)\n")
 	if manualInterventionCount > 0 {
 		sb.WriteString("  [F3] Manual intervention (rename ambiguous titles)\n")
+	}
+	if len(report.LooseFiles) > 0 {
+		sb.WriteString("  [F4] Organize loose files (move to proper structure)\n")
 	}
 	sb.WriteString("  [Enter] Clean (delete duplicates + fix compliance)\n")
 	sb.WriteString("  [Esc] Skip cleaning\n")

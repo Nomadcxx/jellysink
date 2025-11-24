@@ -39,26 +39,37 @@ func ScanMoviesWithProgress(paths []string, progressCh chan<- ScanProgress) ([]M
 	var pr *ProgressReporter
 	if progressCh != nil {
 		pr = NewProgressReporterWithInterval(progressCh, "scanning_movies", 200*time.Millisecond)
-		pr.StageUpdate("counting_files", "Counting movie files...")
+		pr.StageUpdate("validating", "Validating library paths...")
 
+		if err := ValidateBeforeScan(paths, "movie scan", pr); err != nil {
+			pr.LogCritical(err, "Pre-scan validation failed")
+			return nil, fmt.Errorf("validation failed: %w", err)
+		}
+
+		pr.StageUpdate("counting_files", "Counting movie files...")
 		total, err := CountVideoFilesWithProgress(paths, pr)
 		if err != nil {
+			pr.LogCritical(err, "Failed to count movie files")
 			return nil, fmt.Errorf("failed to count files: %w", err)
 		}
+
+		if total == 0 {
+			pr.Send("warn", "No video files found in accessible paths")
+			return []MovieDuplicate{}, nil
+		}
+
 		pr.Start(total, fmt.Sprintf("Scanning %d movie files...", total))
 	}
 
-	// Map: normalized_name|year -> []MovieFile
 	movieGroups := make(map[string]*MovieDuplicate)
 	filesProcessed := 0
 
 	for _, libPath := range paths {
-		// Verify path exists
 		if _, err := os.Stat(libPath); err != nil {
 			if pr != nil {
-				pr.LogError(err, fmt.Sprintf("Library path not accessible: %s", libPath))
+				pr.Send("warn", fmt.Sprintf("Skipping inaccessible path: %s", libPath))
 			}
-			return nil, fmt.Errorf("library path not accessible: %s: %w", libPath, err)
+			continue
 		}
 
 		// Walk directory tree

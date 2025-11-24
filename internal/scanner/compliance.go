@@ -321,7 +321,31 @@ func ScanTVComplianceWithAmbiguous(paths []string, progressCh chan<- ScanProgres
 
 			// Collect ambiguous shows (not API-verified) for manual intervention
 			if resolution.IsAmbiguous && !resolution.APIVerified {
+				// SAFETY CHECK: Ensure we're actually in a proper TV show structure
+				// Path should be: libPath/ShowName/Season##/episode.mkv
+				// Going up 2 levels should give us ShowName folder, NOT the library root or storage root
 				showFolder := filepath.Dir(filepath.Dir(path)) // Go up from Season folder to Show folder
+
+				// Validate folder depth: showFolder must be below libPath
+				// This prevents catastrophic bugs where loose files cause showFolder = storage root
+				if !strings.HasPrefix(showFolder, libPath) || showFolder == libPath {
+					// Loose file or invalid structure - skip for manual intervention
+					if pr != nil {
+						pr.SendSeverityImmediate("warn", fmt.Sprintf("Skipping loose file (not in proper Show/Season structure): %s", path))
+					}
+					return nil
+				}
+
+				// Additional safety: showFolder should be exactly 1 level below libPath
+				relPath, err := filepath.Rel(libPath, showFolder)
+				if err != nil || strings.Contains(relPath, string(filepath.Separator)) {
+					// Too deep or invalid path relationship
+					if pr != nil {
+						pr.SendSeverityImmediate("warn", fmt.Sprintf("Skipping file with invalid folder depth: %s", path))
+					}
+					return nil
+				}
+
 				if !seenAmbiguous[showFolder] {
 					seenAmbiguous[showFolder] = true
 					// Set FolderPath and initialize AffectedFiles for the resolution

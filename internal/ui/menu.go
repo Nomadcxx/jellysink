@@ -47,6 +47,7 @@ func NewMenuModel(cfg *config.Config) MenuModel {
 	items := []list.Item{
 		MenuItem{title: "Run Manual Scan", desc: "Scan your media libraries for duplicates and compliance issues"},
 		MenuItem{title: "View Last Report", desc: "View the most recent scan report"},
+		MenuItem{title: "Manage Backups", desc: "Create, view, and revert library backups"},
 		MenuItem{title: "Configure Frequency", desc: "Set automatic scan frequency (daily/weekly/biweekly)"},
 		MenuItem{title: "Enable/Disable Daemon", desc: "Toggle automatic background scanning"},
 		MenuItem{title: "Configure Libraries", desc: "Add or remove media library paths"},
@@ -172,6 +173,12 @@ func (m MenuModel) handleSelection(title string) (tea.Model, tea.Cmd) {
 
 	case "View Last Report":
 		return m, m.viewLastReport
+
+	case "Manage Backups":
+		backupModel := NewBackupMenuModel(m.config)
+		backupModel.width = m.width
+		backupModel.height = m.height
+		return backupModel, backupModel.Init()
 
 	case "Configure Frequency":
 		freqModel := NewFrequencyMenuModel(m.config)
@@ -1479,6 +1486,9 @@ type ScanningModel struct {
 
 	// Keyboard state
 	scrollOffset int
+
+	// Channel management
+	channelClosed bool
 }
 
 // AlertMessage returns the current alert message (for tests and external packages)
@@ -1492,6 +1502,14 @@ func (m *ScanningModel) ClearAlert() { m.showAlert = false; m.alertMsg = "" }
 
 // SetSize sets the internal width/height used by the model (for testing)
 func (m *ScanningModel) SetSize(width, height int) { m.width = width; m.height = height }
+
+// safeCloseProgressCh closes the progress channel only once
+func (m *ScanningModel) safeCloseProgressCh() {
+	if !m.channelClosed {
+		close(m.progressCh)
+		m.channelClosed = true
+	}
+}
 
 // NewScanningModel creates a new scanning screen
 func NewScanningModel(cfg *config.Config) ScanningModel {
@@ -1520,7 +1538,11 @@ func (m ScanningModel) Init() tea.Cmd {
 
 // waitForProgress listens for progress updates
 func (m ScanningModel) waitForProgress() tea.Msg {
-	progress := <-m.progressCh
+	progress, ok := <-m.progressCh
+	if !ok {
+		// Channel closed, no more progress
+		return nil
+	}
 	return progress
 }
 
@@ -1546,6 +1568,7 @@ func (m ScanningModel) renderLogs() string {
 func (m ScanningModel) runScan() tea.Msg {
 	d := daemon.New(m.config)
 	reportPath, err := d.RunScanWithProgress(m.ctx, m.progressCh)
+	close(m.progressCh) // Signal no more progress updates
 	return scanStatusMsg{reportPath: reportPath, err: err}
 }
 
@@ -1562,7 +1585,6 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "ctrl+c":
 				m.cancel()
-				close(m.progressCh)
 				return m, tea.Quit
 			}
 			return m, nil
@@ -1571,7 +1593,6 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			m.cancel()
-			close(m.progressCh)
 			return m, tea.Quit
 		case "up", "k":
 			m.viewport, _ = m.viewport.Update(msg)
@@ -1687,12 +1708,10 @@ func (m ScanningModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scanStatusMsg:
 		// Scan completed - switch to report view
 		if msg.err != nil {
-			close(m.progressCh)
 			return m, tea.Printf("Scan failed: %v", msg.err)
 		}
 
 		// Load report and switch to report view
-		close(m.progressCh)
 		report, err := loadReportJSON(msg.reportPath)
 		if err != nil {
 			return m, tea.Printf("Failed to load report: %v", err)
