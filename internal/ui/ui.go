@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -17,8 +18,12 @@ import (
 // Custom messages for progress updates
 type progressMsg scanner.ScanProgress
 type cleanProgressMsg scanner.ScanProgress
+type renameProgressMsg scanner.ScanProgress
 type scanCompleteMsg reporter.Report
 type scanErrorMsg error
+type renameCompleteMsg struct {
+	result string
+}
 
 // ViewMode represents the current TUI view
 type ViewMode int
@@ -30,6 +35,7 @@ const (
 	ViewManualIntervention
 	ViewConflictReview
 	ViewBatchSummary
+	ViewBatchRenaming
 	ViewScanning
 	ViewCleanOptions
 	ViewCleanConfirm
@@ -68,6 +74,12 @@ type Model struct {
 	cleanResult       string
 	dryRun            bool
 	cleanOptionCursor int // 0 = Dry Run, 1 = Full Clean
+
+	// Batch rename state
+	renaming         bool
+	renameProgressCh chan scanner.ScanProgress
+	renameResult     string
+	renameErrors     []error
 }
 
 // NewModel creates a new TUI model with a scan report
@@ -172,6 +184,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.renderCleaning())
 		return m, nil
 
+	case renameProgressMsg:
+		// Batch rename progress update
+		progress := scanner.ScanProgress(msg)
+		m.currentProgress = progress.Message
+		m.progressPercent = progress.Percentage
+
+		// Add to log buffer
+		logEntry := LogLine{
+			Timestamp: fmt.Sprintf("%02d:%02d", progress.ElapsedSeconds/60, progress.ElapsedSeconds%60),
+			Operation: progress.Operation,
+			Message:   progress.Message,
+			Severity:  progress.Severity,
+		}
+		m.scanLogs = append(m.scanLogs, logEntry)
+		if len(m.scanLogs) > 100 {
+			m.scanLogs = m.scanLogs[1:]
+		}
+
+		// Update viewport content
+		m.viewport.SetContent(m.renderBatchRenaming())
+
+		// Continue listening for progress
+		return m, waitForRenameProgress(m.renameProgressCh)
+
+	case renameCompleteMsg:
+		// Batch rename finished
+		m.renaming = false
+		if msg.result != "" {
+			m.renameResult = msg.result
+		}
+		// If renameResult is still empty, set a default message
+		if m.renameResult == "" {
+			m.renameResult = SuccessStyle.Render("✓ Batch rename completed")
+		}
+		m.viewport.SetContent(m.renderBatchRenaming())
+		return m, nil
+
 	case tea.KeyMsg:
 		if m.editingTitle {
 			switch msg.String() {
@@ -192,7 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						conflict := m.conflicts[m.currentConflictIndex]
 						conflict.UserDecision = scanner.DecisionCustomTitle
 						conflict.CustomTitle = value
-						conflict.ResolvedTitle = value
+						// Don't update ResolvedTitle - we need the original for rename
 						m.viewport.SetContent(m.renderConflictReview())
 					} else {
 						m.editedTitles[m.selectedAmbiguousIndex] = value
@@ -420,8 +469,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Enter in batch summary applies renames
 			if m.mode == ViewBatchSummary {
-				m.shouldClean = true
-				return m, tea.Quit
+				m.mode = ViewBatchRenaming
+				m.renaming = true
+				m.scanLogs = []LogLine{}
+				m.viewport.SetContent(m.renderBatchRenaming())
+				return m, m.runBatchRename()
+			}
+			// Enter in batch renaming complete returns to summary
+			if m.mode == ViewBatchRenaming && !m.renaming {
+				m.mode = ViewSummary
+				m.viewport.SetContent(m.renderSummary())
+				return m, nil
 			}
 			return m, nil
 
@@ -430,7 +488,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				conflict := m.conflicts[m.currentConflictIndex]
 				if conflict.FolderMatch != nil {
 					conflict.UserDecision = scanner.DecisionFolderTitle
-					conflict.ResolvedTitle = conflict.FolderMatch.Title
+					// Don't update ResolvedTitle - we need the original for rename
 					m.viewport.SetContent(m.renderConflictReview())
 				}
 				return m, nil
@@ -451,7 +509,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				conflict := m.conflicts[m.currentConflictIndex]
 				if conflict.FilenameMatch != nil {
 					conflict.UserDecision = scanner.DecisionFilenameTitle
-					conflict.ResolvedTitle = conflict.FilenameMatch.Title
+					// Don't update ResolvedTitle - we need the original for rename
 					m.viewport.SetContent(m.renderConflictReview())
 				}
 				return m, nil
@@ -630,6 +688,15 @@ func (m Model) View() string {
 			FormatKeybinding("Enter", "Apply Changes"),
 			FormatKeybinding("Esc", "Back"),
 		)
+
+	case ViewBatchRenaming:
+		if m.renaming {
+			header = FormatHeader("BATCH RENAMING")
+			footer = FormatFooter(MutedStyle.Render("Please wait..."))
+		} else {
+			header = FormatHeader("BATCH RENAME COMPLETE")
+			footer = FormatFooter(FormatKeybinding("Enter", "Back to Summary"))
+		}
 
 	case ViewManualIntervention:
 		header = FormatHeader("MANUAL INTERVENTION REQUIRED")
@@ -1367,6 +1434,197 @@ func waitForCleanProgress(progressCh chan scanner.ScanProgress) tea.Cmd {
 type cleanCompleteMsg struct {
 	result string
 	err    error
+}
+
+// renderBatchRenaming renders the batch rename progress view
+func (m Model) renderBatchRenaming() string {
+	var sb strings.Builder
+
+	// ASCII header
+	sb.WriteString(FormatASCIIHeader() + "\n\n")
+
+	if m.renaming {
+		sb.WriteString(TitleStyle.Render("BATCH RENAMING IN PROGRESS") + "\n\n")
+
+		// Show progress bar
+		progressBar := renderProgressBar(m.progressPercent, 50)
+		sb.WriteString(progressBar + "\n")
+		sb.WriteString(fmt.Sprintf("  %s %.1f%%\n\n", m.currentProgress, m.progressPercent))
+
+		// Show rename log (last 20 lines)
+		sb.WriteString(TitleStyle.Render("RENAME LOG") + "\n")
+		sb.WriteString(strings.Repeat("─", 80) + "\n")
+
+		startIdx := 0
+		if len(m.scanLogs) > 20 {
+			startIdx = len(m.scanLogs) - 20
+		}
+
+		for _, log := range m.scanLogs[startIdx:] {
+			var prefix string
+			switch log.Severity {
+			case "error":
+				prefix = ErrorStyle.Render("✗")
+			case "warn":
+				prefix = WarningStyle.Render("⚠")
+			case "success":
+				prefix = SuccessStyle.Render("✓")
+			default:
+				prefix = InfoStyle.Render("•")
+			}
+
+			timeStr := ""
+			if log.Timestamp != "" {
+				timeStr = MutedStyle.Render(fmt.Sprintf("[%s] ", log.Timestamp))
+			}
+
+			sb.WriteString(fmt.Sprintf("%s %s%s\n", prefix, timeStr, log.Message))
+		}
+	} else {
+		// Renaming complete
+		sb.WriteString(TitleStyle.Render("BATCH RENAME COMPLETE") + "\n\n")
+		sb.WriteString(m.renameResult + "\n\n")
+		sb.WriteString(MutedStyle.Render("Press Enter to return to summary") + "\n")
+	}
+
+	return sb.String()
+}
+
+// runBatchRename executes the batch rename operation
+func (m *Model) runBatchRename() tea.Cmd {
+	// Create progress channel and store in model
+	m.renameProgressCh = make(chan scanner.ScanProgress, 100)
+
+	// Start renaming in goroutine
+	go func() {
+		var allResults []scanner.RenameResult
+		var allErrors []error
+		totalConflicts := 0
+		successCount := 0
+		errorCount := 0
+
+		pr := scanner.NewProgressReporter(m.renameProgressCh, "batch_rename")
+		pr.Start(len(m.conflicts), "Starting batch rename")
+
+		// Process each conflict resolution
+		for i, conflict := range m.conflicts {
+			if conflict.UserDecision == scanner.DecisionSkipped {
+				continue
+			}
+
+			totalConflicts++
+			percent := float64(i+1) / float64(len(m.conflicts)) * 100
+			pr.Update(int(percent), fmt.Sprintf("Processing %d/%d: %s", i+1, len(m.conflicts), conflict.ResolvedTitle))
+
+			// Determine the new title based on user decision
+			var newTitle string
+			switch conflict.UserDecision {
+			case scanner.DecisionFolderTitle:
+				if conflict.FolderMatch != nil {
+					newTitle = conflict.FolderMatch.Title
+				}
+			case scanner.DecisionFilenameTitle:
+				if conflict.FilenameMatch != nil {
+					newTitle = conflict.FilenameMatch.Title
+				}
+			case scanner.DecisionCustomTitle:
+				newTitle = conflict.CustomTitle
+			default:
+				newTitle = conflict.ResolvedTitle
+			}
+
+			if newTitle == "" {
+				pr.SendSeverityImmediate("error", fmt.Sprintf("No valid title for: %s", conflict.FolderPath))
+				errorCount++
+				continue
+			}
+
+			// Apply rename for this show
+			// We need to pass the parent directory (library path) not the show folder itself
+			basePath := filepath.Dir(conflict.FolderPath)
+			// Compute oldTitle based on folder match or filename match (fallback to ResolvedTitle)
+			oldTitle := ""
+			if conflict.FolderMatch != nil {
+				oldTitle = conflict.FolderMatch.Title
+			} else if conflict.FilenameMatch != nil {
+				oldTitle = conflict.FilenameMatch.Title
+			} else {
+				// As a last resort, extract title from folder path
+				oldTitle, _ = scanner.ExtractTVShowTitle(filepath.Base(conflict.FolderPath))
+			}
+
+			results, err := scanner.ApplyManualTVRenameWithProgress(
+				basePath,
+				oldTitle,
+				newTitle,
+				false, // Not dry run
+				pr,
+			)
+
+			if err != nil {
+				pr.SendSeverityImmediate("error", fmt.Sprintf("Failed to rename %s: %v", oldTitle, err))
+				allErrors = append(allErrors, err)
+				errorCount++
+			} else if len(results) == 0 {
+				pr.SendSeverityImmediate("warn", fmt.Sprintf("No files or folder found to rename for: %s", oldTitle))
+				allErrors = append(allErrors, fmt.Errorf("no files renamed for %s", oldTitle))
+				errorCount++
+			} else {
+				allResults = append(allResults, results...)
+				successCount++
+				pr.SendSeverityImmediate("success", fmt.Sprintf("Renamed: %s → %s (%d files)", oldTitle, newTitle, len(results)))
+			}
+		}
+
+		pr.Complete("Batch rename complete")
+		close(m.renameProgressCh)
+
+		// Build result summary
+		var sb strings.Builder
+		if errorCount == 0 {
+			sb.WriteString(SuccessStyle.Render("✓ Batch rename completed successfully!") + "\n\n")
+		} else {
+			sb.WriteString(WarningStyle.Render("⚠ Batch rename completed with errors") + "\n\n")
+		}
+
+		sb.WriteString(InfoStyle.Render("Results:") + "\n")
+		sb.WriteString(fmt.Sprintf("  • Shows processed: %s\n", StatStyle.Render(fmt.Sprintf("%d", totalConflicts))))
+		sb.WriteString(fmt.Sprintf("  • Successful: %s\n", SuccessStyle.Render(fmt.Sprintf("%d", successCount))))
+		if errorCount > 0 {
+			sb.WriteString(fmt.Sprintf("  • Failed: %s\n", ErrorStyle.Render(fmt.Sprintf("%d", errorCount))))
+		}
+		sb.WriteString(fmt.Sprintf("  • Total file operations: %s\n", StatStyle.Render(fmt.Sprintf("%d", len(allResults)))))
+
+		if len(allErrors) > 0 {
+			sb.WriteString(fmt.Sprintf("\n%s\n", ErrorStyle.Render(fmt.Sprintf("✗ %d error(s) occurred:", len(allErrors)))))
+			for i, err := range allErrors {
+				if i >= 5 {
+					sb.WriteString(MutedStyle.Render(fmt.Sprintf("  ... and %d more\n", len(allErrors)-5)))
+					break
+				}
+				sb.WriteString(ErrorStyle.Render(fmt.Sprintf("  • %v\n", err)))
+			}
+		}
+
+		m.renameResult = sb.String()
+		m.renameErrors = allErrors
+	}()
+
+	// Wait for first progress message
+	return waitForRenameProgress(m.renameProgressCh)
+}
+
+func waitForRenameProgress(progressCh chan scanner.ScanProgress) tea.Cmd {
+	return func() tea.Msg {
+		progress, ok := <-progressCh
+		if !ok {
+			// Channel closed, renaming is complete
+			return renameCompleteMsg{
+				result: "", // Result already set in model
+			}
+		}
+		return renameProgressMsg(progress)
+	}
 }
 
 // renderConflictReview renders single conflict review screen (Stage 1)

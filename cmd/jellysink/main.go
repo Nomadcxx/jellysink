@@ -430,9 +430,26 @@ func performConflictRenames(report reporter.Report, conflicts []*scanner.TVTitle
 			oldTitle = conflict.FolderMatch.Title
 		} else if conflict.FilenameMatch != nil {
 			oldTitle = conflict.FilenameMatch.Title
+		} else {
+			oldTitle = conflict.ResolvedTitle
 		}
 
-		newTitle := conflict.ResolvedTitle
+		// Determine newTitle based on user decision
+		var newTitle string
+		switch conflict.UserDecision {
+		case scanner.DecisionFolderTitle:
+			if conflict.FolderMatch != nil {
+				newTitle = conflict.FolderMatch.Title
+			}
+		case scanner.DecisionFilenameTitle:
+			if conflict.FilenameMatch != nil {
+				newTitle = conflict.FilenameMatch.Title
+			}
+		case scanner.DecisionCustomTitle:
+			newTitle = conflict.CustomTitle
+		default:
+			newTitle = conflict.ResolvedTitle
+		}
 
 		if oldTitle == "" || newTitle == "" {
 			fmt.Printf("⚠ Skipping conflict with missing title data\n")
@@ -449,9 +466,12 @@ func performConflictRenames(report reporter.Report, conflicts []*scanner.TVTitle
 				continue
 			}
 
+			// Verify results contain at least one successful operation
+			showSuccessCount := 0
 			for _, result := range results {
 				totalResults = append(totalResults, result)
 				if result.Success {
+					showSuccessCount++
 					successCount++
 					typeStr := "file"
 					if result.IsFolder {
@@ -462,6 +482,9 @@ func performConflictRenames(report reporter.Report, conflicts []*scanner.TVTitle
 					errorCount++
 					fmt.Printf("  ✗ Failed: %s - %s\n", result.OldPath, result.Error)
 				}
+			}
+			if showSuccessCount == 0 {
+				fmt.Printf("  ⚠ No files were renamed in %s for show %s -> %s\n", libPath, oldTitle, newTitle)
 			}
 		}
 	}

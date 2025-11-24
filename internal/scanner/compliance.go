@@ -324,7 +324,18 @@ func ScanTVComplianceWithAmbiguous(paths []string, progressCh chan<- ScanProgres
 				showFolder := filepath.Dir(filepath.Dir(path)) // Go up from Season folder to Show folder
 				if !seenAmbiguous[showFolder] {
 					seenAmbiguous[showFolder] = true
+					// Set FolderPath and initialize AffectedFiles for the resolution
+					resolution.FolderPath = showFolder
+					resolution.AffectedFiles = []string{path}
 					ambiguousShows = append(ambiguousShows, resolution)
+				} else {
+					// Add this file to the existing resolution's affected files
+					for _, existing := range ambiguousShows {
+						if existing.FolderPath == showFolder {
+							existing.AffectedFiles = append(existing.AffectedFiles, path)
+							break
+						}
+					}
 				}
 			}
 
